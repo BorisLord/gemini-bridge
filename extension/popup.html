@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: system-ui, sans-serif; width: 320px; padding: 12px; margin: 0; }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    .provider { margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #eee; }
+    .provider:last-child { border-bottom: none; }
+    .name { font-size: 12px; font-weight: 600; color: #1a1a1a; margin-bottom: 2px; }
+    .server { font-size: 12px; padding: 6px 8px; background: #f6f8fa; border-radius: 4px; margin-bottom: 10px; }
+    .ok { color: #137333; font-size: 12px; }
+    .err { color: #c5221f; font-size: 12px; word-break: break-word; }
+    .sub { font-size: 11px; color: #888; margin: 2px 0; }
+    .acctsel { width: 100%; margin: 4px 0; padding: 4px; font-size: 12px; }
+    button { padding: 5px 10px; font-size: 11px; cursor: pointer; margin-right: 4px; }
+    .discover { background: #f0f0f0; border: 1px solid #ccc; }
+    #sync { margin-top: 4px; background: #1a73e8; color: #fff; border: none; padding: 6px 12px; }
+  </style>
+</head>
+<body>
+  <h1>Gemini Bridge</h1>
+  <div id="server" class="server">Checking server…</div>
+  <div id="providers">Loading…</div>
+  <button id="sync">Sync now</button>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
