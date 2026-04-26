@@ -1,0 +1,65 @@
+diff --git a/src/app/main.py b/src/app/main.py
+index 7ce2f76..5bcc835 100644
+--- a/src/app/main.py
++++ b/src/app/main.py
+@@ -8,7 +8,7 @@ from app.services.session_manager import init_session_managers
+ from app.logger import logger
+ 
+ # Import endpoint routers
+-from app.endpoints import gemini, chat, google_generative
++from app.endpoints import gemini, chat, google_generative, auth
+ 
+ @asynccontextmanager
+ async def lifespan(app: FastAPI):
+@@ -16,25 +16,18 @@ async def lifespan(app: FastAPI):
+     Application lifespan manager.
+     Initializes services on startup.
+     """
+-    # Try to get the existing client first
+-    client_initialized = False
++    # Always reinitialize in worker: the parent's httpx client is bound to a dead
++    # event loop after multiprocessing fork.
++    import app.services.gemini_client as gc_mod
++    gc_mod._gemini_client = None
+     try:
+-        get_gemini_client()
+-        client_initialized = True
+-        logger.info("Gemini client found (initialized in main process).")
+-    except GeminiClientNotInitializedError:
+-        logger.info("Gemini client not initialized in worker process, attempting reinitialization...")
+-
+-    # If client is not available, try to initialize it (for multiprocessing support)
+-    if not client_initialized:
+-        try:
+-            init_result = await init_gemini_client()
+-            if init_result:
+-                logger.info("Gemini client successfully initialized in worker process.")
+-            else:
+-                logger.error("Failed to initialize Gemini client in worker process.")
+-        except Exception as e:
+-            logger.error(f"Error initializing Gemini client in worker process: {e}")
++        init_result = await init_gemini_client()
++        if init_result:
++            logger.info("Gemini client successfully initialized in worker process.")
++        else:
++            logger.error("Failed to initialize Gemini client in worker process.")
++    except Exception as e:
++        logger.error(f"Error initializing Gemini client in worker process: {e}")
+ 
+     # Initialize session managers only if the client is available
+     try:
+@@ -54,7 +47,7 @@ app = FastAPI(lifespan=lifespan)
+ 
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=["*"],
++    allow_origin_regex=r"^(chrome-extension://.*|http://(localhost|127\.0\.0\.1)(:\d+)?)$",
+     allow_credentials=True,
+     allow_methods=["*"],
+     allow_headers=["*"],
+@@ -64,3 +57,5 @@ app.add_middleware(
+ app.include_router(gemini.router)
+ app.include_router(chat.router)
+ app.include_router(google_generative.router)
++app.include_router(auth.router)
++app.include_router(auth.status_router)

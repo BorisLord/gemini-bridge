@@ -1,0 +1,346 @@
+diff --git a/src/app/endpoints/chat.py b/src/app/endpoints/chat.py
+index 4c49650..fe7e0e2 100644
+--- a/src/app/endpoints/chat.py
++++ b/src/app/endpoints/chat.py
+@@ -1,17 +1,56 @@
+ # src/app/endpoints/chat.py
++import json
+ import time
+ from fastapi import APIRouter, HTTPException
++from fastapi.responses import StreamingResponse
+ from app.logger import logger
+ from schemas.request import GeminiRequest, OpenAIChatRequest
+ from app.services.gemini_client import get_gemini_client, GeminiClientNotInitializedError
+ from app.services.session_manager import get_translate_session_manager
++from gemini_webapi.exceptions import AuthError, TimeoutError as GeminiTimeoutError
+ 
+ router = APIRouter()
+ 
++
++def _map_gemini_error(exc: Exception) -> HTTPException:
++    """Map an exception from the Gemini layer to the right HTTP status."""
++    msg = str(exc).lower()
++    if isinstance(exc, AuthError):
++        return HTTPException(401, f"Gemini auth failed (cookies expired?): {exc}")
++    if isinstance(exc, GeminiTimeoutError) or "timeout" in msg:
++        return HTTPException(504, f"Gemini upstream timed out: {exc}")
++    if any(k in msg for k in ("usage limit", "quota", "rate limit", "too many requests", "exceeded")):
++        return HTTPException(429, f"Gemini usage limit reached: {exc}")
++    return HTTPException(502, f"Gemini upstream error: {exc}")
++
++@router.get("/v1/gems")
++async def list_gems():
++    try:
++        gemini_client = get_gemini_client()
++    except GeminiClientNotInitializedError as e:
++        raise HTTPException(status_code=503, detail=str(e))
++
++    try:
++        gems = await gemini_client.fetch_gems()
++        return {
++            "gems": [
++                {
++                    "id": gem.id,
++                    "name": gem.name,
++                    "description": gem.description,
++                    "predefined": gem.predefined,
++                }
++                for gem in gems
++            ]
++        }
++    except Exception as e:
++        logger.error(f"Error fetching gems: {e}", exc_info=True)
++        raise HTTPException(status_code=500, detail=f"Error fetching gems: {str(e)}")
++
+ @router.post("/translate")
+ async def translate_chat(request: GeminiRequest):
+     try:
+-        gemini_client = get_gemini_client()
++        get_gemini_client()  # raises if not initialized
+     except GeminiClientNotInitializedError as e:
+         raise HTTPException(status_code=503, detail=str(e))
+ 
+@@ -24,12 +63,12 @@ async def translate_chat(request: GeminiRequest):
+         return {"response": response.text}
+     except Exception as e:
+         logger.error(f"Error in /translate endpoint: {e}", exc_info=True)
+-        raise HTTPException(status_code=500, detail=f"Error during translation: {str(e)}")
++        raise _map_gemini_error(e)
+ 
+-def convert_to_openai_format(response_text: str, model: str, stream: bool = False):
++def convert_to_openai_format(response_text: str, model: str):
+     return {
+         "id": f"chatcmpl-{int(time.time())}",
+-        "object": "chat.completion.chunk" if stream else "chat.completion",
++        "object": "chat.completion",
+         "created": int(time.time()),
+         "model": model,
+         "choices": [
+@@ -49,6 +88,37 @@ def convert_to_openai_format(response_text: str, model: str, stream: bool = Fals
+         },
+     }
+ 
++
++def stream_openai_format(response_text: str, model: str):
++    """Simulate SSE streaming from a complete response, compatible with OpenAI streaming format."""
++    chunk_id = f"chatcmpl-{int(time.time())}"
++    created = int(time.time())
++
++    # 1. Opening role delta
++    first = {
++        "id": chunk_id, "object": "chat.completion.chunk", "created": created,
++        "model": model,
++        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
++    }
++    yield f"data: {json.dumps(first)}\n\n"
++
++    # 2. Content delta (sent as one chunk; gemini-webapi does not support token-level streaming)
++    content = {
++        "id": chunk_id, "object": "chat.completion.chunk", "created": created,
++        "model": model,
++        "choices": [{"index": 0, "delta": {"content": response_text}, "finish_reason": None}]
++    }
++    yield f"data: {json.dumps(content)}\n\n"
++
++    # 3. Stop delta
++    end = {
++        "id": chunk_id, "object": "chat.completion.chunk", "created": created,
++        "model": model,
++        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
++    }
++    yield f"data: {json.dumps(end)}\n\n"
++    yield "data: [DONE]\n\n"
++
+ @router.post("/v1/chat/completions")
+ async def chat_completions(request: OpenAIChatRequest):
+     try:
+@@ -85,10 +155,15 @@ async def chat_completions(request: OpenAIChatRequest):
+ 
+     if request.model:
+         try:
+-            response = await gemini_client.generate_content(message=final_prompt, model=request.model.value, files=None)
+-            return convert_to_openai_format(response.text, request.model.value, is_stream)
++            response = await gemini_client.generate_content(message=final_prompt, model=request.model, files=None)
++            if is_stream:
++                return StreamingResponse(
++                    stream_openai_format(response.text, request.model),
++                    media_type="text/event-stream"
++                )
++            return convert_to_openai_format(response.text, request.model)
+         except Exception as e:
+             logger.error(f"Error in /v1/chat/completions endpoint: {e}", exc_info=True)
+-            raise HTTPException(status_code=500, detail=f"Error processing chat completion: {str(e)}")
++            raise _map_gemini_error(e)
+     else:
+         raise HTTPException(status_code=400, detail="Model not specified in the request.")
+diff --git a/src/app/endpoints/gemini.py b/src/app/endpoints/gemini.py
+index c2036e6..47e9545 100644
+--- a/src/app/endpoints/gemini.py
++++ b/src/app/endpoints/gemini.py
+@@ -4,6 +4,7 @@ from app.logger import logger
+ from schemas.request import GeminiRequest
+ from app.services.gemini_client import get_gemini_client, GeminiClientNotInitializedError
+ from app.services.session_manager import get_gemini_chat_manager
++from app.endpoints.chat import _map_gemini_error
+ 
+ from pathlib import Path
+ from typing import Union, List, Optional
+@@ -18,18 +19,17 @@ async def gemini_generate(request: GeminiRequest):
+         raise HTTPException(status_code=503, detail=str(e))
+ 
+     try:
+-        # Use the value attribute for the model (since GeminiRequest.model is an Enum)
+         files: Optional[List[Union[str, Path]]] = [Path(f) for f in request.files] if request.files else None
+         response = await gemini_client.generate_content(request.message, request.model.value, files=files)
+         return {"response": response.text}
+     except Exception as e:
+         logger.error(f"Error in /gemini endpoint: {e}", exc_info=True)
+-        raise HTTPException(status_code=500, detail=f"Error generating content: {str(e)}")
++        raise _map_gemini_error(e)
+ 
+ @router.post("/gemini-chat")
+ async def gemini_chat(request: GeminiRequest):
+     try:
+-        gemini_client = get_gemini_client()
++        get_gemini_client()  # raises if not initialized
+     except GeminiClientNotInitializedError as e:
+         raise HTTPException(status_code=503, detail=str(e))
+ 
+@@ -41,4 +41,4 @@ async def gemini_chat(request: GeminiRequest):
+         return {"response": response.text}
+     except Exception as e:
+         logger.error(f"Error in /gemini-chat endpoint: {e}", exc_info=True)
+-        raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
++        raise _map_gemini_error(e)
+diff --git a/src/models/gemini.py b/src/models/gemini.py
+index 48fdd56..0a43d4b 100644
+--- a/src/models/gemini.py
++++ b/src/models/gemini.py
+@@ -1,31 +1,96 @@
+-# src/models/gemini.py
++import configparser
++import logging
++import os
+ from typing import Optional, List, Union
+ from pathlib import Path
++from urllib.parse import urlparse, urlunparse
+ from gemini_webapi import GeminiClient as WebGeminiClient
+-from app.config import CONFIG
++
++logger = logging.getLogger("app")
++
++# config.conf lives at the repo's server/ root; resolve from this file's location.
++_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.conf"
++
++
++def _inject_account_index(url: str, idx: int) -> str:
++    """Rewrite https://gemini.google.com/<path> -> /u/{idx}/<path>.
++    Idempotent if the path already starts with /u/{N}/."""
++    if idx <= 0 or "gemini.google.com" not in url:
++        return url
++    parsed = urlparse(url)
++    if parsed.netloc != "gemini.google.com":
++        return url
++    path = parsed.path
++    parts = path.lstrip("/").split("/", 2)
++    if len(parts) >= 2 and parts[0] == "u" and parts[1].isdigit():
++        return url  # already prefixed
++    new_path = f"/u/{idx}{path}"
++    return urlunparse(parsed._replace(path=new_path))
++
+ 
+ class MyGeminiClient:
+-    """
+-    Wrapper for the Gemini Web API client.
+-    """
+-    def __init__(self, secure_1psid: str, secure_1psidts: str, proxy: str | None = None) -> None:
++    """Wrapper for the Gemini Web API client with multi-account support."""
++
++    def __init__(
++        self,
++        secure_1psid: str,
++        secure_1psidts: str,
++        proxy: str | None = None,
++        account_index: int = 0,
++    ) -> None:
+         self.client = WebGeminiClient(secure_1psid, secure_1psidts, proxy)
++        self.account_index = account_index
+ 
+     async def init(self) -> None:
+-        """Initialize the Gemini client."""
+         await self.client.init()
++        if self.account_index > 0:
++            self._install_account_router()
++        await self._persist_cookies()
++
++    def _install_account_router(self) -> None:
++        """Wrap the underlying AsyncSession.request to inject /u/{N}/ in Gemini URLs."""
++        session = self.client.client
++        if session is None or getattr(session, "_account_routed", False):
++            return
++        original_request = session.request
++        idx = self.account_index
++
++        async def routed_request(method, url, *args, **kwargs):
++            return await original_request(method, _inject_account_index(url, idx), *args, **kwargs)
++
++        session.request = routed_request
++        session._account_routed = True
++        logger.info(f"Account router installed: requests will hit /u/{idx}/...")
++
++    async def _persist_cookies(self) -> None:
++        if not _CONFIG_PATH.exists():
++            logger.warning(f"Cannot persist cookies: {_CONFIG_PATH} not found.")
++            return
++        try:
++            cookies = self.client.cookies
++            psid = cookies.get("__Secure-1PSID")
++            psidts = cookies.get("__Secure-1PSIDTS")
++            if not psid:
++                return
++            cfg = configparser.ConfigParser()
++            cfg.read(_CONFIG_PATH, encoding="utf-8")
++            if "Cookies" not in cfg:
++                cfg["Cookies"] = {}
++            cfg["Cookies"]["gemini_cookie_1psid"] = psid
++            if psidts:
++                cfg["Cookies"]["gemini_cookie_1psidts"] = psidts
++            with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
++                cfg.write(f)
++            os.chmod(_CONFIG_PATH, 0o600)
++            logger.info("Cookies persisted to config.conf after rotation.")
++        except Exception as e:
++            logger.warning(f"Failed to persist cookies: {e}")
++
+     async def generate_content(self, message: str, model: str, files: Optional[List[Union[str, Path]]] = None):
+-        """
+-        Generate content using the Gemini client.
+-        """
+         return await self.client.generate_content(message, model=model, files=files)
+ 
+     async def close(self) -> None:
+-        """Close the Gemini client."""
+         await self.client.close()
+ 
+     def start_chat(self, model: str):
+-        """
+-        Start a chat session with the given model.
+-        """
+         return self.client.start_chat(model=model)
+diff --git a/src/schemas/request.py b/src/schemas/request.py
+index 0eb3662..6c69bfb 100644
+--- a/src/schemas/request.py
++++ b/src/schemas/request.py
+@@ -3,34 +3,41 @@ from enum import Enum
+ from typing import List, Optional
+ from pydantic import BaseModel, Field
+ 
+-class GeminiModels(str, Enum):
+-    """
+-    An enumeration of the available Gemini models.
+-    """
+ 
+-    # Gemini 3.0 Series
+-    PRO_3_0 = "gemini-3.0-pro"
++class GeminiModels(str, Enum):
++    """Model names matching gemini-webapi >= 2.0.0."""
+ 
+-    # Gemini 2.5 Series
+-    PRO_2_5 = "gemini-2.5-pro"
+-    FLASH_2_5 = "gemini-2.5-flash"
++    PRO_3 = "gemini-3-pro"
++    FLASH_3 = "gemini-3-flash"
++    FLASH_3_THINKING = "gemini-3-flash-thinking"
++    PRO_3_PLUS = "gemini-3-pro-plus"
++    FLASH_3_PLUS = "gemini-3-flash-plus"
++    FLASH_3_THINKING_PLUS = "gemini-3-flash-thinking-plus"
++    PRO_3_ADVANCED = "gemini-3-pro-advanced"
++    FLASH_3_ADVANCED = "gemini-3-flash-advanced"
++    FLASH_3_THINKING_ADVANCED = "gemini-3-flash-thinking-advanced"
++    UNSPECIFIED = "unspecified"
+ 
+ 
+ class GeminiRequest(BaseModel):
+     message: str
+-    model: GeminiModels = Field(default=GeminiModels.FLASH_2_5, description="Model to use for Gemini.")
++    model: GeminiModels = Field(default=GeminiModels.FLASH_3_PLUS, description="Model to use for Gemini.")
+     files: Optional[List[str]] = []
+ 
++
+ class OpenAIChatRequest(BaseModel):
+     messages: List[dict]
+-    model: Optional[GeminiModels] = None
++    model: Optional[str] = None
+     stream: Optional[bool] = False
+ 
++
+ class Part(BaseModel):
+     text: str
+ 
++
+ class Content(BaseModel):
+     parts: List[Part]
+ 
++
+ class GoogleGenerativeRequest(BaseModel):
+     contents: List[Content]

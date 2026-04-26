@@ -1,0 +1,188 @@
+diff --git a/src/app/endpoints/auth.py b/src/app/endpoints/auth.py
+new file mode 100644
+index 0000000..067979b
+--- /dev/null
++++ b/src/app/endpoints/auth.py
+@@ -0,0 +1,119 @@
++import re
++import httpx
++from fastapi import APIRouter, Header, HTTPException
++from pydantic import BaseModel, Field
++from typing import Optional, Dict, List
++
++from app.services.gemini_client import refresh_gemini_client
++from app.logger import logger
++
++router = APIRouter(prefix="/auth", tags=["auth"])
++status_router = APIRouter(prefix="/admin", tags=["admin"])
++
++
++@status_router.get("/status")
++async def get_status():
++    """Read-only status: which mode (webai/g4f) and whether g4f is installed."""
++    try:
++        import g4f  # noqa: F401
++        g4f_installed = True
++    except ImportError:
++        g4f_installed = False
++    return {
++        "mode": "webai",  # FastAPI worker only runs in webai mode; g4f mode replaces this process entirely
++        "g4f_installed": g4f_installed,
++        "switch_hint": "To switch modes, type '2' (g4f) or '1' (webai) in the terminal where ./start.sh is running.",
++    }
++
++UA = (
++    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
++    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
++)
++
++
++class CookiesPayload(BaseModel):
++    cookies: Dict[str, str]
++    account_index: int = Field(default=0, ge=0, le=20)
++
++
++class AccountInfo(BaseModel):
++    index: int
++    email: str
++
++
++def _check_origin(origin: Optional[str]) -> None:
++    if not origin or not origin.startswith("chrome-extension://"):
++        raise HTTPException(403, "Origin must be a chrome-extension:// URL")
++
++
++_EMAIL_RX = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
++
++
++async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> Optional[str]:
++    """Hit gemini.google.com/u/{idx}/app and extract the signed-in email."""
++    try:
++        r = await client.get(f"https://gemini.google.com/u/{idx}/app", timeout=10.0)
++    except Exception:
++        return None
++    if r.status_code != 200:
++        return None
++    # If Google redirected /u/{idx} to /u/{0} the index is out of range.
++    final_path = str(r.url.path)
++    if idx > 0 and (final_path.startswith("/u/0") or final_path == "/app"):
++        return None
++    for email in _EMAIL_RX.findall(r.text[:300000]):
++        if email.endswith("@google.com"):
++            continue
++        if "noreply" in email or "no-reply" in email:
++            continue
++        if email.endswith("@gemini.google.com"):
++            continue
++        return email
++    return None
++
++
++@router.post("/cookies/{provider}")
++async def update_cookies(
++    provider: str,
++    payload: CookiesPayload,
++    origin: Optional[str] = Header(default=None),
++):
++    _check_origin(origin)
++    if provider == "gemini":
++        psid = payload.cookies.get("__Secure-1PSID")
++        psidts = payload.cookies.get("__Secure-1PSIDTS")
++        if not psid or not psidts:
++            raise HTTPException(400, "Missing __Secure-1PSID or __Secure-1PSIDTS")
++        ok = await refresh_gemini_client(psid, psidts, account_index=payload.account_index)
++        if not ok:
++            raise HTTPException(502, "Failed to authenticate with provided cookies")
++        logger.info(f"Provider 'gemini' refreshed (u/{payload.account_index}) by {origin}")
++        return {"status": "ok", "provider": provider, "account_index": payload.account_index}
++    raise HTTPException(501, f"Provider '{provider}' is not wired on the server side yet.")
++
++
++@router.post("/accounts/{provider}", response_model=List[AccountInfo])
++async def list_accounts(
++    provider: str,
++    payload: CookiesPayload,
++    origin: Optional[str] = Header(default=None),
++):
++    """Probe /u/0…/u/MAX with the provided cookies and return discovered accounts."""
++    _check_origin(origin)
++    if provider != "gemini":
++        raise HTTPException(501, f"Provider '{provider}' not supported.")
++    cookies = {k: v for k, v in payload.cookies.items()}
++    headers = {"User-Agent": UA}
++    found: List[AccountInfo] = []
++    seen: set = set()
++    async with httpx.AsyncClient(cookies=cookies, headers=headers, follow_redirects=True) as client:
++        for idx in range(0, 8):
++            email = await _probe_gemini_account(client, idx)
++            if not email:
++                continue
++            if email in seen:
++                # If two indices yield the same email, /u/N has wrapped around (idx out of range).
++                break
++            seen.add(email)
++            found.append(AccountInfo(index=idx, email=email))
++    return found
+diff --git a/src/app/services/gemini_client.py b/src/app/services/gemini_client.py
+index 37cb027..63b97c2 100644
+--- a/src/app/services/gemini_client.py
++++ b/src/app/services/gemini_client.py
+@@ -40,7 +40,16 @@ async def init_gemini_client() -> bool:
+                 gemini_proxy = None
+ 
+             if gemini_cookie_1PSID and gemini_cookie_1PSIDTS:
+-                _gemini_client = MyGeminiClient(secure_1psid=gemini_cookie_1PSID, secure_1psidts=gemini_cookie_1PSIDTS, proxy=gemini_proxy)
++                try:
++                    account_index = int(CONFIG["Cookies"].get("gemini_account_index") or 0)
++                except ValueError:
++                    account_index = 0
++                _gemini_client = MyGeminiClient(
++                    secure_1psid=gemini_cookie_1PSID,
++                    secure_1psidts=gemini_cookie_1PSIDTS,
++                    proxy=gemini_proxy,
++                    account_index=account_index,
++                )
+                 await _gemini_client.init()
+                 logger.info("Gemini client initialized successfully.")
+                 return True
+@@ -70,6 +79,40 @@ async def init_gemini_client() -> bool:
+         return False
+ 
+ 
++async def refresh_gemini_client(psid: str, psidts: str, account_index: int = 0) -> bool:
++    """
++    Replace the running Gemini client with a new one built from fresh cookies.
++    Used by /auth/cookies to hot-rotate auth without restarting the server.
++    """
++    global _gemini_client, _initialization_error
++    proxy = CONFIG["Proxy"].get("http_proxy") or None
++    try:
++        new_client = MyGeminiClient(
++            secure_1psid=psid,
++            secure_1psidts=psidts,
++            proxy=proxy,
++            account_index=account_index,
++        )
++        await new_client.init()
++    except Exception as e:
++        logger.error(f"Failed to refresh Gemini client: {e}")
++        _initialization_error = str(e)
++        return False
++    old_client = _gemini_client
++    _gemini_client = new_client
++    _initialization_error = None
++    CONFIG["Cookies"]["gemini_cookie_1psid"] = psid
++    CONFIG["Cookies"]["gemini_cookie_1psidts"] = psidts
++    CONFIG["Cookies"]["gemini_account_index"] = str(account_index)
++    if old_client is not None:
++        try:
++            await old_client.close()
++        except Exception:
++            pass
++    logger.info(f"Gemini client refreshed (account_index={account_index}).")
++    return True
++
++
+ def get_gemini_client():
+     """
+     Returns the initialized Gemini client instance.
