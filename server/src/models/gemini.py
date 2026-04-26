@@ -1,0 +1,96 @@
+import configparser
+import logging
+import os
+from typing import Optional, List, Union
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+from gemini_webapi import GeminiClient as WebGeminiClient
+
+logger = logging.getLogger("app")
+
+# config.conf lives at the repo's server/ root; resolve from this file's location.
+_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.conf"
+
+
+def _inject_account_index(url: str, idx: int) -> str:
+    """Rewrite https://gemini.google.com/<path> -> /u/{idx}/<path>.
+    Idempotent if the path already starts with /u/{N}/."""
+    if idx <= 0 or "gemini.google.com" not in url:
+        return url
+    parsed = urlparse(url)
+    if parsed.netloc != "gemini.google.com":
+        return url
+    path = parsed.path
+    parts = path.lstrip("/").split("/", 2)
+    if len(parts) >= 2 and parts[0] == "u" and parts[1].isdigit():
+        return url  # already prefixed
+    new_path = f"/u/{idx}{path}"
+    return urlunparse(parsed._replace(path=new_path))
+
+
+class MyGeminiClient:
+    """Wrapper for the Gemini Web API client with multi-account support."""
+
+    def __init__(
+        self,
+        secure_1psid: str,
+        secure_1psidts: str,
+        proxy: str | None = None,
+        account_index: int = 0,
+    ) -> None:
+        self.client = WebGeminiClient(secure_1psid, secure_1psidts, proxy)
+        self.account_index = account_index
+
+    async def init(self) -> None:
+        await self.client.init()
+        if self.account_index > 0:
+            self._install_account_router()
+        await self._persist_cookies()
+
+    def _install_account_router(self) -> None:
+        """Wrap the underlying AsyncSession.request to inject /u/{N}/ in Gemini URLs."""
+        session = self.client.client
+        if session is None or getattr(session, "_account_routed", False):
+            return
+        original_request = session.request
+        idx = self.account_index
+
+        async def routed_request(method, url, *args, **kwargs):
+            return await original_request(method, _inject_account_index(url, idx), *args, **kwargs)
+
+        session.request = routed_request
+        session._account_routed = True
+        logger.info(f"Account router installed: requests will hit /u/{idx}/...")
+
+    async def _persist_cookies(self) -> None:
+        if not _CONFIG_PATH.exists():
+            logger.warning(f"Cannot persist cookies: {_CONFIG_PATH} not found.")
+            return
+        try:
+            cookies = self.client.cookies
+            psid = cookies.get("__Secure-1PSID")
+            psidts = cookies.get("__Secure-1PSIDTS")
+            if not psid:
+                return
+            cfg = configparser.ConfigParser()
+            cfg.read(_CONFIG_PATH, encoding="utf-8")
+            if "Cookies" not in cfg:
+                cfg["Cookies"] = {}
+            cfg["Cookies"]["gemini_cookie_1psid"] = psid
+            if psidts:
+                cfg["Cookies"]["gemini_cookie_1psidts"] = psidts
+            with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+                cfg.write(f)
+            os.chmod(_CONFIG_PATH, 0o600)
+            logger.info("Cookies persisted to config.conf after rotation.")
+        except Exception as e:
+            logger.warning(f"Failed to persist cookies: {e}")
+
+    async def generate_content(self, message: str, model: str, files: Optional[List[Union[str, Path]]] = None):
+        return await self.client.generate_content(message, model=model, files=files)
+
+    async def close(self) -> None:
+        await self.client.close()
+
+    def start_chat(self, model: str):
+        return self.client.start_chat(model=model)

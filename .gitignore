@@ -1,0 +1,16 @@
+# Sensitive: cookies and machine-specific config
+server/config.conf
+.env
+**/.env
+
+# Build/runtime artifacts
+server/.venv/
+server/**/__pycache__/
+server/.gemini_webapi/
+__pycache__/
+.venv/
+
+# Misc
+*.har
+*.log
+*.pyc
