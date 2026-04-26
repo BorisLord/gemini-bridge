@@ -1,0 +1,14 @@
+[Unit]
+Description=Gemini Bridge (WebAI-to-API local proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/dev/gemini-bridge
+ExecStart=%h/Documents/dev/gemini-bridge/start.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

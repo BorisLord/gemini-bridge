@@ -1,0 +1,26 @@
+services:
+  gemini-bridge:
+    build:
+      context: .
+      args:
+        WITH_G4F: "0"
+    image: gemini-bridge:local
+    container_name: gemini-bridge
+    restart: unless-stopped
+    ports:
+      # Bind to localhost only so the bridge stays a private endpoint.
+      # The Chrome extension still pushes to http://localhost:6969 unchanged.
+      - "127.0.0.1:6969:6969"
+    volumes:
+      # Persist cookies + account index across container restarts.
+      # Entrypoint symlinks /data/config.conf into the path the app expects.
+      - gemini-bridge-data:/data
+    environment:
+      - GEMINI_BRIDGE_PORT=6969
+      # - GEMINI_BRIDGE_DEBUG=1
+      # - GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS=8000
+    stdin_open: false   # run.py's interactive 1/2 mode-switch is unused here
+    tty: false
+
+volumes:
+  gemini-bridge-data:
