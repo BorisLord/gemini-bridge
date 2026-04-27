@@ -2,6 +2,9 @@
 Description=Gemini Bridge (WebAI-to-API local proxy)
 After=network-online.target
 Wants=network-online.target
+# Cap restarts: 3 failures in 60 s, then stop (avoid tight loop on misconfig).
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple

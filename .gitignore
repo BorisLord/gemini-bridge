@@ -7,10 +7,19 @@ server/config.conf
 server/.venv/
 server/**/__pycache__/
 server/.gemini_webapi/
+server/uv.lock
+server/src/config.conf
 __pycache__/
 .venv/
 
 # Misc
 *.har
 *.log
+*.log.*
+server/logs/
 *.pyc
+
+# Editors / tooling
+.vscode/
+.idea/
+.python-version

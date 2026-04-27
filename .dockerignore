@@ -1,0 +1,22 @@
+# Local artifacts that must NOT leak into the image
+server/.venv/
+server/.gemini_webapi/
+server/.ruff_cache/
+server/__pycache__/
+server/**/__pycache__/
+server/.env
+server/config.conf
+*.pyc
+*.log
+*.log.*
+server/logs/
+.git/
+.github/
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# Misc
+*.har
+.DS_Store
