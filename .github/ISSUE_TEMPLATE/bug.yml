@@ -1,0 +1,57 @@
+name: Bug report
+description: Something isn't working as expected
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the bug. Include the exact request/response if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the bridge with `./start.sh`
+        2. `curl ...`
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant lines from `server/logs/bridge.log` or `journalctl --user -u gemini-bridge`. Run with `GEMINI_BRIDGE_DEBUG=1` for verbose output.
+      render: shell
+  - type: input
+    id: client
+    attributes:
+      label: Client
+      placeholder: OpenCode 0.x, Cline, Aider, curl, ...
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      placeholder: gemini-3-pro-plus
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Native (start.sh)
+        - Docker
+        - Systemd
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / browser
+      placeholder: Ubuntu 24.04, Chrome 130
+    validations:
+      required: true
