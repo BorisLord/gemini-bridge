@@ -8,7 +8,6 @@ from gemini_webapi import GeminiClient as WebGeminiClient
 
 logger = logging.getLogger("app")
 
-# config.conf lives at the repo's server/ root; resolve from this file's location.
 _CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.conf"
 
 
@@ -23,23 +22,30 @@ def _inject_account_index(url: str, idx: int) -> str:
     path = parsed.path
     parts = path.lstrip("/").split("/", 2)
     if len(parts) >= 2 and parts[0] == "u" and parts[1].isdigit():
-        return url  # already prefixed
+        return url
     new_path = f"/u/{idx}{path}"
     return urlunparse(parsed._replace(path=new_path))
 
 
 class MyGeminiClient:
-    """Wrapper for the Gemini Web API client with multi-account support."""
-
     def __init__(
         self,
         secure_1psid: str,
         secure_1psidts: str,
         proxy: str | None = None,
         account_index: int = 0,
+        extra_cookies: Optional[dict] = None,
     ) -> None:
         self.client = WebGeminiClient(secure_1psid, secure_1psidts, proxy)
         self.account_index = account_index
+        # gemini-webapi only stores 1PSID/1PSIDTS by default. Workspace accounts
+        # often need the full Google session (SID, HSID, SAPISID, …) for RPCs
+        # to report AUTHENTICATED — forward whatever the extension captures.
+        if extra_cookies:
+            extras = {k: v for k, v in extra_cookies.items()
+                      if k not in ("__Secure-1PSID", "__Secure-1PSIDTS") and v}
+            if extras:
+                self.client.cookies = extras  # setter; sets domain=.google.com
 
     async def init(self) -> None:
         await self.client.init()
@@ -48,7 +54,7 @@ class MyGeminiClient:
         await self._persist_cookies()
 
     def _install_account_router(self) -> None:
-        """Wrap the underlying AsyncSession.request to inject /u/{N}/ in Gemini URLs."""
+        """Wrap AsyncSession.request to inject /u/{N}/ in Gemini URLs."""
         session = self.client.client
         if session is None or getattr(session, "_account_routed", False):
             return
@@ -79,18 +85,25 @@ class MyGeminiClient:
             cfg["Cookies"]["gemini_cookie_1psid"] = psid
             if psidts:
                 cfg["Cookies"]["gemini_cookie_1psidts"] = psidts
-            with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            # Atomic write so a mid-write crash can't truncate config.conf and
+            # lose the rotated cookies.
+            tmp = _CONFIG_PATH.with_suffix(_CONFIG_PATH.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 cfg.write(f)
-            os.chmod(_CONFIG_PATH, 0o600)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, _CONFIG_PATH)
             logger.info("Cookies persisted to config.conf after rotation.")
         except Exception as e:
             logger.warning(f"Failed to persist cookies: {e}")
 
-    async def generate_content(self, message: str, model: str, files: Optional[List[Union[str, Path]]] = None):
-        return await self.client.generate_content(message, model=model, files=files)
+    async def generate_content(
+        self,
+        message: str,
+        model: str,
+        files: Optional[List[Union[str, Path]]] = None,
+        gem: Optional[str] = None,
+    ):
+        return await self.client.generate_content(message, model=model, files=files, gem=gem)
 
     async def close(self) -> None:
         await self.client.close()
-
-    def start_chat(self, model: str):
-        return self.client.start_chat(model=model)

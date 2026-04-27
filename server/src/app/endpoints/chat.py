@@ -1,4 +1,3 @@
-# src/app/endpoints/chat.py
 import asyncio
 import json
 import os
@@ -8,29 +7,33 @@ import uuid
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from app.logger import logger
-from schemas.request import GeminiRequest, OpenAIChatRequest
-from app.services.gemini_client import get_gemini_client, GeminiClientNotInitializedError
-from app.services.session_manager import get_translate_session_manager
+from schemas.request import OpenAIChatRequest
+from app.services.gemini_client import (
+    get_gemini_client,
+    get_selected_gem_id,
+    GeminiClientNotInitializedError,
+)
 from app.services.fallback import (
-    is_g4f_available,
+    is_available as is_fallback_available,
+    is_enabled as is_fallback_enabled,
+    has_api_key as has_fallback_key,
     is_sticky_active,
-    call_g4f_fallback,
-    FALLBACK_MODEL,
+    call_openrouter_fallback,
+    get_model as get_fallback_model,
+    FallbackDisabledError,
 )
 from gemini_webapi.exceptions import AuthError, TimeoutError as GeminiTimeoutError
 
 router = APIRouter()
 
-# --- Tool-calling shim ----------------------------------------------------
-# gemini-webapi only speaks free-form text. We tell Gemini to emit a delimited
-# JSON block per tool invocation, and parse those blocks back into
-# OpenAI-shaped `tool_calls[]` so clients (OpenCode, Vercel AI SDK, etc.) see
-# native function calling.
+# gemini-webapi only speaks free-form text. We ask Gemini to emit a delimited
+# JSON block per tool invocation, then parse those back into OpenAI-shaped
+# `tool_calls[]` so clients see native function calling.
 
 _TOOL_CALL_RE = re.compile(r"<<TOOL_CALL>>\s*(\{.*?\})\s*<<END>>", re.DOTALL)
-# Backup: catch the OpenCode-prompt-leaked text format `[tool_call:<name> for <args>]`.
+# Backup: OpenCode-prompt-leaked text format `[tool_call:<name> for <args>]`.
 _TEXT_TOOL_CALL_RE = re.compile(r"\[tool_call:\s*(\w+)\s+for\s+(.+?)\]", re.DOTALL)
 
 
@@ -46,7 +49,6 @@ def _build_tools_system_prompt(tools: list[dict]) -> str:
             f"  description: {first_line}\n"
             f"  parameters (JSON Schema): {json.dumps(fn.get('parameters', {}))[:500]}"
         )
-    # Pick the first real tool name as a concrete example (OpenCode's first is usually `bash`).
     first_real = None
     for t in tools:
         fn = t.get("function") or t
@@ -94,9 +96,8 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
     forgets it). Falls back to legacy [tool_call:name for args] text format if needed."""
     out = []
 
-    # Walk every <<TOOL_CALL>> marker; for each, parse JSON greedily up to the next marker
-    # or end of text. raw_decode stops at the end of the first valid JSON object, so an
-    # optional trailing <<END>> is naturally ignored.
+    # raw_decode stops at the end of the first valid JSON object, so a missing
+    # trailing <<END>> is naturally ignored.
     markers = [m.start() for m in re.finditer(r"<<TOOL_CALL>>", text)]
     for i, start in enumerate(markers):
         end_pos = markers[i + 1] if i + 1 < len(markers) else len(text)
@@ -116,7 +117,6 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
             "function": {"name": name, "arguments": json.dumps(args)},
         })
 
-    # Fallback: legacy [tool_call: name for args] only if no JSON blocks matched.
     if not out and tool_names:
         for m in _TEXT_TOOL_CALL_RE.finditer(text):
             name_guess, args_text = m.group(1), m.group(2).strip()
@@ -134,15 +134,11 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
     return out
 
 
-# --- Debug logging --------------------------------------------------------
-# Two levels:
-#   - Always-on: high-signal events (REQ.HEAD, SHIM, TRUNCATE, GEMINI.ERR,
-#     GEMINI.OK summary, RESP.* mode). Goes to console only.
-#   - Gated by GEMINI_BRIDGE_DEBUG=1: verbose dumps (REQ.TOOL, REQ.MSG,
-#     PROMPT, full response body). Console + /tmp/gemini-bridge-debug.log.
+# Verbose dumps (REQ.TOOL, REQ.MSG, PROMPT, full bodies) are gated by
+# GEMINI_BRIDGE_DEBUG=1 and tee'd to /tmp/gemini-bridge-debug.log.
 _VERBOSE_DEBUG = os.environ.get("GEMINI_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
 _DEBUG_LOG_PATH = Path("/tmp/gemini-bridge-debug.log")
-_DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB rotation cap
+_DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024
 
 
 def _dlog(tag: str, _verbose: bool = False, **fields) -> None:
@@ -169,22 +165,15 @@ def _truncate(s: str | None, n: int = 800) -> str:
     return f"{s[:n//2]}…[TRUNCATED {len(s)-n} chars]…{s[-n//2:]}"
 
 
-# --- Tool-result truncation ----------------------------------------------
 # Gemini Web silently aborts requests when the total prompt is too large.
-# Per-tier ceilings (Google docs):
-#   - free       : 32k tokens  ≈ 128k chars  → keep tool results small (8k)
-#   - Pro (-plus): 1M tokens   ≈ 4M chars    → can afford 32k per result
-#   - Ultra (-advanced): same 1M → 128k per result
-# A single env override `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS` collapses all
-# tiers to the same cap if set (legacy behavior).
+# Per-tier char budgets per tool result (free 32k tok, Pro/Ultra 1M tok).
+# `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS` overrides all tiers.
 _TIER_CAPS = {"free": 8_000, "plus": 32_000, "advanced": 128_000}
 _EXPLICIT_CAP = os.environ.get("GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS")
-MAX_TOOL_RESULT_CHARS = int(_EXPLICIT_CAP) if _EXPLICIT_CAP else _TIER_CAPS["free"]  # legacy export
+MAX_TOOL_RESULT_CHARS = int(_EXPLICIT_CAP) if _EXPLICIT_CAP else _TIER_CAPS["free"]
 
-# Hard timeout on a single Gemini call. gemini-webapi has its own retry
-# decorator that can stretch a doomed request to 60-120s while it re-inits
-# the client between attempts. We short-circuit at this duration so the
-# auto-fallback to g4f kicks in fast.
+# gemini-webapi's retry decorator can stretch a doomed request to 60-120s while
+# re-initing the client. Short-circuit so auto-fallback engages fast.
 GEMINI_REQUEST_TIMEOUT = float(os.environ.get("GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS", "30"))
 
 
@@ -222,54 +211,11 @@ def _map_gemini_error(exc: Exception) -> HTTPException:
         return HTTPException(429, f"Gemini usage limit reached: {exc}")
     if "status: 401" in msg or "status: 403" in msg:
         return HTTPException(401, f"Gemini auth refused: {exc}")
-    # Captcha / abuse-detection wall: Gemini redirects to /sorry/index (Status: 302)
-    # or returns Status: 0 when the redirect is blocked. Treat as quota-like so the
-    # auto-fallback engages.
+    # Captcha/abuse wall: Gemini redirects to /sorry/index (302). Treat as
+    # quota-like so auto-fallback engages.
     if "status: 302" in msg or "sorry" in msg:
         return HTTPException(429, f"Gemini captcha wall (abuse detection): {exc}")
     return HTTPException(502, f"Gemini upstream error: {exc}")
-
-@router.get("/v1/gems")
-async def list_gems():
-    try:
-        gemini_client = get_gemini_client()
-    except GeminiClientNotInitializedError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-    try:
-        gems = await gemini_client.fetch_gems()
-        return {
-            "gems": [
-                {
-                    "id": gem.id,
-                    "name": gem.name,
-                    "description": gem.description,
-                    "predefined": gem.predefined,
-                }
-                for gem in gems
-            ]
-        }
-    except Exception as e:
-        logger.error(f"Error fetching gems: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error fetching gems: {str(e)}")
-
-@router.post("/translate")
-async def translate_chat(request: GeminiRequest):
-    try:
-        get_gemini_client()  # raises if not initialized
-    except GeminiClientNotInitializedError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-    session_manager = get_translate_session_manager()
-    if not session_manager:
-        raise HTTPException(status_code=503, detail="Session manager is not initialized.")
-    try:
-        # This call now correctly uses the fixed session manager
-        response = await session_manager.get_response(request.model, request.message, request.files)
-        return {"response": response.text}
-    except Exception as e:
-        logger.error(f"Error in /translate endpoint: {e}", exc_info=True)
-        raise _map_gemini_error(e)
 
 def convert_to_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None):
     if tool_calls:
@@ -279,7 +225,7 @@ def convert_to_openai_format(response_text: str, model: str, tool_calls: list[di
         message = {"role": "assistant", "content": response_text}
         finish = "stop"
     return {
-        "id": f"chatcmpl-{int(time.time())}",
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
@@ -289,8 +235,7 @@ def convert_to_openai_format(response_text: str, model: str, tool_calls: list[di
 
 
 def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None):
-    """Simulate SSE streaming from a complete response, compatible with OpenAI streaming format."""
-    chunk_id = f"chatcmpl-{int(time.time())}"
+    chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
     first = {
         "id": chunk_id, "object": "chat.completion.chunk", "created": created,
@@ -342,6 +287,15 @@ def _is_gemini_model(name: str) -> bool:
     return name.startswith("gemini-")
 
 
+def _first_message(or_resp: dict) -> dict:
+    """Extract `choices[0].message`. Fails loudly when `choices` is missing/empty —
+    we've seen 200s with `{"choices": []}` on truncated upstream errors."""
+    choices = or_resp.get("choices") if isinstance(or_resp, dict) else None
+    if not choices:
+        raise HTTPException(502, f"Empty 'choices' in upstream response: {str(or_resp)[:300]}")
+    return choices[0].get("message") or {}
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIChatRequest):
     is_stream = request.stream if request.stream is not None else False
@@ -357,33 +311,36 @@ async def chat_completions(request: OpenAIChatRequest):
           tools=(len(request.tools) if request.tools else 0),
           tool_choice=str(request.tool_choice) if request.tool_choice else None)
 
-    # Passthrough: any non-Gemini model ID goes straight to g4f, no sticky tracking.
-    # Lets the user pick free no-auth models (command-r-plus, qwen-3-235b, …) directly
-    # in OpenCode without waiting for Gemini to fail.
+    # Non-Gemini model IDs go straight to OpenRouter (no sticky tracking) so the
+    # user can pick a free OpenRouter model directly without Gemini failing first.
     if not _is_gemini_model(request.model):
-        if not is_g4f_available():
-            raise HTTPException(503, f"Model '{request.model}' is non-Gemini but g4f is not installed.")
-        from fastapi.responses import JSONResponse
+        if not is_fallback_available():
+            detail = (
+                f"Model '{request.model}' is non-Gemini but OpenRouter fallback is "
+                + ("disabled (toggle ON in extension popup)." if not is_fallback_enabled()
+                   else "missing an API key (set OPENROUTER_API_KEY or paste one in the extension popup).")
+            )
+            raise HTTPException(503, detail)
         _dlog("PASSTHROUGH", req=req_id, model=request.model)
-        logger.info(f"Passthrough → g4f ({request.model})")
+        logger.info(f"Passthrough → OpenRouter ({request.model})")
         try:
-            g4f_resp = await call_g4f_fallback(
+            or_resp = await call_openrouter_fallback(
                 request.messages, request.tools,
                 reason="explicit", model=request.model, arm_sticky=False,
             )
         except Exception as e:
             _dlog("PASSTHROUGH.ERR", req=req_id, err=_truncate(str(e), 300))
-            logger.error(f"g4f passthrough failed for {request.model}: {e}")
-            raise HTTPException(502, f"g4f passthrough failed: {e}")
-        headers = {"X-Bridge-Fallback": f"g4f:{request.model}:explicit"}
+            logger.error(f"OpenRouter passthrough failed for {request.model}: {e}")
+            raise HTTPException(502, f"OpenRouter passthrough failed: {e}")
+        headers = {"X-Bridge-Fallback": f"openrouter:{request.model}:explicit"}
         if is_stream:
-            msg = (g4f_resp.get("choices", [{}])[0].get("message", {}) or {})
+            msg = _first_message(or_resp)
             return StreamingResponse(
                 stream_openai_format(msg.get("content") or "", request.model, msg.get("tool_calls") or None),
                 media_type="text/event-stream",
                 headers=headers,
             )
-        return JSONResponse(content=g4f_resp, headers=headers)
+        return JSONResponse(content=or_resp, headers=headers)
 
     try:
         gemini_client = get_gemini_client()
@@ -426,9 +383,11 @@ async def chat_completions(request: OpenAIChatRequest):
                 blocks = []
                 for tc in tcs:
                     fn = tc.get("function") or {}
+                    raw_args = fn.get("arguments") or "{}"
                     try:
-                        args_obj = json.loads(fn.get("arguments") or "{}")
-                    except Exception:
+                        args_obj = json.loads(raw_args)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"[shim] tool args JSON parse failed: {e} — raw={raw_args[:200]!r}")
                         args_obj = {}
                     blocks.append("<<TOOL_CALL>>\n" + json.dumps({"name": fn.get("name"), "arguments": args_obj}) + "\n<<END>>")
                 prefix = f"Assistant: {content}\n" if content else "Assistant: "
@@ -450,8 +409,8 @@ async def chat_completions(request: OpenAIChatRequest):
     if not conversation_parts:
         raise HTTPException(status_code=400, detail="No valid messages found.")
 
-    # Inject the tool-calling protocol as a LATE system block so it overrides any
-    # earlier conventions baked into the client's huge system prompt.
+    # Inject the tool-calling protocol LATE so it overrides any earlier conventions
+    # baked into the client's huge system prompt.
     if request.tools:
         conversation_parts.append("System (tool-calling protocol — overrides earlier instructions):\n"
                                   + _build_tools_system_prompt(request.tools))
@@ -461,70 +420,86 @@ async def chat_completions(request: OpenAIChatRequest):
           head=_truncate(final_prompt[:1500], 1500),
           tail=_truncate(final_prompt[-1500:], 1500))
 
-    async def _serve_via_g4f(reason: str, origin_err: Optional[Exception] = None):
-        from fastapi.responses import JSONResponse
-        _dlog("FALLBACK.TRY", req=req_id, reason=reason, model=FALLBACK_MODEL,
+    async def _serve_via_openrouter(reason: str, origin_err: Optional[Exception] = None):
+        fb_model = get_fallback_model()
+        _dlog("FALLBACK.TRY", req=req_id, reason=reason, model=fb_model,
               origin_err=_truncate(str(origin_err), 200) if origin_err else None)
         if origin_err:
-            logger.warning(f"Gemini {reason} → g4f fallback engaged ({FALLBACK_MODEL}): {origin_err}")
+            logger.warning(f"Gemini {reason} → OpenRouter fallback engaged ({fb_model}): {origin_err}")
         else:
-            logger.info(f"Sticky fallback active → g4f ({FALLBACK_MODEL}) — bypassing Gemini")
-        g4f_resp = await call_g4f_fallback(request.messages, request.tools, reason)
+            logger.info(f"Sticky fallback active → OpenRouter ({fb_model}) — bypassing Gemini")
+        or_resp = await call_openrouter_fallback(request.messages, request.tools, reason)
         _dlog("FALLBACK.OK", req=req_id, latency_s=round(time.time() - t0, 2))
-        headers = {"X-Bridge-Fallback": f"g4f:{FALLBACK_MODEL}:{reason}"}
-        # Annotate the model field so the OpenCode UI surfaces the fallback.
-        annotated_model = f"{request.model}→g4f:{FALLBACK_MODEL}"
+        headers = {"X-Bridge-Fallback": f"openrouter:{fb_model}:{reason}"}
+        annotated_model = f"{request.model}→openrouter:{fb_model}"
         if is_stream:
-            msg = (g4f_resp.get("choices", [{}])[0].get("message", {}) or {})
+            msg = _first_message(or_resp)
             return StreamingResponse(
                 stream_openai_format(msg.get("content") or "", annotated_model, msg.get("tool_calls") or None),
                 media_type="text/event-stream",
                 headers=headers,
             )
-        if isinstance(g4f_resp, dict):
-            g4f_resp["model"] = annotated_model
-        return JSONResponse(content=g4f_resp, headers=headers)
+        if isinstance(or_resp, dict):
+            or_resp["model"] = annotated_model
+        return JSONResponse(content=or_resp, headers=headers)
 
     t0 = time.time()
 
-    # Sticky shortcut: if a recent fallback flipped Gemini off, skip the
-    # Gemini call entirely until the sticky window expires.
-    if is_sticky_active() and is_g4f_available():
+    # Sticky shortcut: a recent fallback flipped Gemini off — skip Gemini entirely
+    # until the sticky window expires.
+    if is_sticky_active() and is_fallback_available():
         try:
-            return await _serve_via_g4f(reason="sticky")
+            return await _serve_via_openrouter(reason="sticky")
+        except FallbackDisabledError:
+            pass
         except Exception as fb_e:
             _dlog("FALLBACK.ERR", req=req_id, sticky=True, err=_truncate(str(fb_e), 300))
             logger.error(f"Sticky fallback failed, falling back to Gemini: {fb_e}")
-            # fallthrough — try Gemini as last resort
 
     try:
         response = await asyncio.wait_for(
-            gemini_client.generate_content(message=final_prompt, model=request.model, files=None),
+            gemini_client.generate_content(
+                message=final_prompt,
+                model=request.model,
+                files=None,
+                gem=get_selected_gem_id(),
+            ),
             timeout=GEMINI_REQUEST_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        # Map asyncio's TimeoutError to a Gemini-shaped exception so the existing
-        # 504 → fallback path engages.
+        # Reshape asyncio.TimeoutError into Gemini's so the 504→fallback path engages.
         e = GeminiTimeoutError(f"Gemini request exceeded {GEMINI_REQUEST_TIMEOUT}s (bridge-side cutoff)")
         mapped = _map_gemini_error(e)
-        if mapped.status_code in (429, 401, 502, 504) and is_g4f_available():
+        if mapped.status_code in (429, 401, 502, 504) and is_fallback_available():
             try:
-                return await _serve_via_g4f(reason="timeout", origin_err=e)
+                return await _serve_via_openrouter(reason="timeout", origin_err=e)
             except Exception as fb_e:
                 _dlog("FALLBACK.ERR", req=req_id, err=_truncate(str(fb_e), 300))
-                logger.error(f"g4f fallback after timeout failed: {fb_e}")
+                logger.error(f"OpenRouter fallback after timeout failed: {fb_e}")
                 raise mapped
+        if mapped.status_code in (429, 401, 502, 504) and is_fallback_enabled() and not has_fallback_key():
+            raise HTTPException(
+                503,
+                f"Gemini failed ({mapped.detail}) and OpenRouter fallback is enabled but has no API key. "
+                "Set OPENROUTER_API_KEY or paste a key in the extension popup.",
+            )
         raise mapped
     except Exception as e:
         mapped = _map_gemini_error(e)
-        if mapped.status_code in (429, 401, 502, 504) and is_g4f_available():
+        if mapped.status_code in (429, 401, 502, 504) and is_fallback_available():
             reason = {429: "quota", 401: "auth", 502: "upstream", 504: "timeout"}.get(mapped.status_code, "error")
             try:
-                return await _serve_via_g4f(reason=reason, origin_err=e)
+                return await _serve_via_openrouter(reason=reason, origin_err=e)
             except Exception as fb_e:
                 _dlog("FALLBACK.ERR", req=req_id, err=_truncate(str(fb_e), 300))
-                logger.error(f"g4f fallback failed: {fb_e}")
+                logger.error(f"OpenRouter fallback failed: {fb_e}")
                 raise mapped
+        if mapped.status_code in (429, 401, 502, 504) and is_fallback_enabled() and not has_fallback_key():
+            raise HTTPException(
+                503,
+                f"Gemini failed ({mapped.detail}) and OpenRouter fallback is enabled but has no API key. "
+                "Set OPENROUTER_API_KEY or paste a key in the extension popup.",
+            )
         _dlog("GEMINI.ERR", req=req_id, err_type=type(e).__name__, err=_truncate(str(e), 500))
         logger.error(f"Error in /v1/chat/completions endpoint: {e}", exc_info=True)
         raise mapped

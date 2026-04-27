@@ -1,47 +1,35 @@
-# src/app/main.py
-from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from fastapi.middleware.cors import CORSMiddleware
 
-from app.services.gemini_client import get_gemini_client, init_gemini_client, GeminiClientNotInitializedError
-from app.services.session_manager import init_session_managers
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from app.services.gemini_client import init_gemini_client
 from app.logger import logger
 
-# Import endpoint routers
-from app.endpoints import gemini, chat, google_generative, auth
+from app.endpoints import chat, auth
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application lifespan manager.
-    Initializes services on startup.
-    """
     # Always reinitialize in worker: the parent's httpx client is bound to a dead
     # event loop after multiprocessing fork.
     import app.services.gemini_client as gc_mod
     gc_mod._gemini_client = None
     try:
-        init_result = await init_gemini_client()
-        if init_result:
+        if await init_gemini_client():
             logger.info("Gemini client successfully initialized in worker process.")
         else:
-            logger.error("Failed to initialize Gemini client in worker process.")
+            logger.warning("Gemini client not initialized — waiting for cookies via /auth/cookies.")
     except Exception as e:
         logger.error(f"Error initializing Gemini client in worker process: {e}")
 
-    # Initialize session managers only if the client is available
-    try:
-        get_gemini_client()
-        init_session_managers()
-        logger.info("Session managers initialized for WebAI-to-API.")
-    except GeminiClientNotInitializedError as e:
-        logger.warning(f"Session managers not initialized: {e}")
-
     yield
 
-    # Shutdown logic: No explicit client closing is needed anymore.
-    # The underlying HTTPX client manages its connection pool automatically.
     logger.info("Application shutdown complete.")
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -53,9 +41,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register the endpoint routers for WebAI-to-API
-app.include_router(gemini.router)
 app.include_router(chat.router)
-app.include_router(google_generative.router)
 app.include_router(auth.router)
 app.include_router(auth.status_router)
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+# Reshape errors to the OpenAI envelope so SDKs that parse `error.message`
+# (openai-python, @ai-sdk/openai-compatible) surface the real reason.
+_ERROR_TYPE_BY_STATUS = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    422: "invalid_request_error",
+    429: "rate_limit_error",
+}
+
+
+def _openai_error_body(status: int, message: str) -> dict:
+    return {
+        "error": {
+            "message": message,
+            "type": _ERROR_TYPE_BY_STATUS.get(status, "api_error"),
+            "param": None,
+            "code": None,
+        }
+    }
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exc_handler(_request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_openai_error_body(exc.status_code, str(exc.detail)),
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(_request: Request, exc: RequestValidationError):
+    msg = "; ".join(
+        f"{'.'.join(str(x) for x in e.get('loc', []))}: {e.get('msg', '')}"
+        for e in exc.errors()
+    ) or "Invalid request payload."
+    return JSONResponse(status_code=422, content=_openai_error_body(422, msg))
