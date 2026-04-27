@@ -1,8 +1,3 @@
-"""Tests for the OpenAI tool-calling shim in app.endpoints.chat.
-
-Run with: cd server && .venv/bin/python -m pytest tests/test_shim.py -v
-(or just `python -m unittest tests.test_shim`)
-"""
 import json
 import os
 import sys
@@ -107,7 +102,8 @@ class TestTruncateToolResult(unittest.TestCase):
         big = "X" * (MAX_TOOL_RESULT_CHARS * 8)
         out, truncated = _maybe_truncate_tool_result(big)
         self.assertTrue(truncated)
-        self.assertLess(len(out), MAX_TOOL_RESULT_CHARS + 200)
+        # head + marker + tail ≈ cap + 30; 150 of slack for marker variance.
+        self.assertLessEqual(len(out), MAX_TOOL_RESULT_CHARS + 150)
         self.assertIn("gemini-bridge truncated", out)
 
     def test_preserves_head_and_tail(self):
