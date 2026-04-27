@@ -1,12 +1,19 @@
 # Gemini Bridge
 
-Local FastAPI + Chrome extension that exposes your **Google Gemini subscription** as an **OpenAI-compatible API** on `http://localhost:6969/v1`. Any client speaking `/v1/chat/completions` (OpenCode, Cline, Continue, Aider, Codex, `curl`…) drives Gemini 3 Pro / Flash / Thinking through your browser quota — no API key, multi-account ready (`/u/0`, `/u/1`, …). Originally forked from [`Amm1rr/WebAI-to-API`](https://github.com/Amm1rr/WebAI-to-API). Verified end-to-end with OpenCode (agentic tool calling).
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/BorisLord/gemini-bridge?include_prereleases&sort=semver)](https://github.com/BorisLord/gemini-bridge/releases)
+
+Local FastAPI + Chrome extension that exposes your **Google Gemini subscription** as an **OpenAI-compatible API** on `http://localhost:6969/v1`. Any client speaking `/v1/chat/completions` (OpenCode, Cline, Continue, Aider, Codex, `curl`…) drives Gemini 3 Pro / Flash / Thinking through your browser quota — no API key, multi-account ready (`/u/0`, `/u/1`, …).
 
 ```
 Chrome ──cookies──▶ localhost:6969 ──/v1/chat/completions──▶ OpenCode / curl / …
                                           │
                                           └─(on Gemini quota/error)─▶ OpenRouter (free)
 ```
+
+## Why
+
+You're paying for **Gemini AI Pro / Ultra**, but agentic coding clients (OpenCode, Cline, Aider, Continue) only speak OpenAI — so the subscription quota you already pay for stays unused. This bridge maps your browser session to `/v1/chat/completions`: same Gemini models, same quota, no extra API bill.
 
 ## Install
 
@@ -15,7 +22,7 @@ All paths require a Chromium-based browser signed into `gemini.google.com`.
 **Native** (Linux / macOS, WSL on Windows) — needs `git` + [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Python 3.10+ is fetched by `uv` automatically.
 
 ```bash
-git clone https://github.com/<you>/gemini-bridge && cd gemini-bridge
+git clone https://github.com/BorisLord/gemini-bridge && cd gemini-bridge
 ./start.sh        # first run sets up venv + deps, then launches on :6969
 ```
 
@@ -42,11 +49,11 @@ Logs: `journalctl --user -u gemini-bridge -f`.
 
 Then in Chrome: `chrome://extensions/` → *Developer mode* → *Load unpacked* → pick `extension/`. Visit `https://gemini.google.com` once, click the extension icon — status should say **✓ Connected**. Quick check: `curl http://localhost:6969/healthz` → `{"status":"ok"}`.
 
-`__Secure-1PSIDTS` rotates ~daily; the extension auto-pushes new values via `chrome.cookies.onChanged`.
+`__Secure-1PSIDTS` rotates ~daily; the extension auto-pushes new values to the bridge.
 
 ## Updating
 
-`git pull && ./start.sh` — `start.sh` detects an incomplete venv (broken `import uvicorn`) and rebuilds it. Docker: `docker compose up --build -d` rebuilds only if `Dockerfile` / `requirements.txt` changed. Systemd users: `systemctl --user restart gemini-bridge` after pull.
+`git pull && ./start.sh` — rebuilds the venv if dependencies changed. Docker: `docker compose up --build -d` rebuilds only if `Dockerfile` / `requirements.txt` changed. Systemd users: `systemctl --user restart gemini-bridge` after pull.
 
 ## Troubleshooting & logs
 
@@ -74,8 +81,6 @@ Click the icon → **Detect accounts** — the server probes `/u/0…7` and retu
 ## Gemini Gems
 
 Open your Gem on `gemini.google.com`, copy the URL (e.g. `https://gemini.google.com/u/0/gem/eb0eb9162487`), paste it (or just the ID) in the popup → **Apply**. Empty + Apply clears. Persists in memory; set `GEMINI_BRIDGE_GEM_ID` to pre-select at boot.
-
-> Auto-detection was removed — Google's `LIST_GEMS` RPC returns `PERMISSION_DENIED` on too many accounts to be reliable.
 
 ## OpenRouter fallback
 
@@ -159,7 +164,7 @@ Override globally with `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS=<n>`.
 
 - **Synthetic SSE**: `gemini-webapi` returns the full response in one shot; bridge chunks it into SSE frames after. No typewriter effect, but protocol-compliant.
 - **No usage tracking**: `usage` block is always zero (Gemini Web doesn't expose remaining quota).
-- **Tool calling via shim**: bridge tells Gemini to emit `<<TOOL_CALL>>{json}<<END>>` blocks and parses them into OpenAI `tool_calls[]`. Tested with OpenCode (Read/Edit/Bash/WebFetch). OpenRouter calls use native tool calling — no shim.
+- **Tool calling via shim**: Gemini Web has no native function calling, so the bridge prompts the model to emit a structured block and parses it into OpenAI `tool_calls[]`. Works with OpenCode (Read/Edit/Bash/WebFetch). OpenRouter calls use native tool calling.
 - One Chrome profile = one bridge. Multiple profiles → multiple ports.
 
 ## Repository layout
@@ -176,4 +181,4 @@ Tests: `cd server && .venv/bin/python -m unittest discover tests -v`. Covers the
 
 ## License
 
-MIT — Copyright (c) 2026. Forked from [`Amm1rr/WebAI-to-API`](https://github.com/Amm1rr/WebAI-to-API) (MIT) — original copyright preserved in `server/LICENSE`.
+MIT — Copyright (c) 2026 Boris Lord. Forked from [`Amm1rr/WebAI-to-API`](https://github.com/Amm1rr/WebAI-to-API) (MIT) — original copyright preserved in `server/LICENSE`.
