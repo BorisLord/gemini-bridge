@@ -1,5 +1,5 @@
 [Unit]
-Description=Gemini Bridge (WebAI-to-API local proxy)
+Description=Gemini Bridge — local OpenAI-compatible API for Google Gemini
 After=network-online.target
 Wants=network-online.target
 # Cap restarts: 3 failures in 60 s, then stop (avoid tight loop on misconfig).
@@ -8,8 +8,9 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Documents/dev/gemini-bridge
-ExecStart=%h/Documents/dev/gemini-bridge/start.sh
+# Edit the two paths below to match where you cloned the repo.
+WorkingDirectory=%h/gemini-bridge
+ExecStart=%h/gemini-bridge/start.sh
 Restart=on-failure
 RestartSec=5
 
