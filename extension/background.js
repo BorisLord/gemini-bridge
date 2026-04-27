@@ -4,14 +4,22 @@ const SERVER_BASE = `${SERVER_BASE_URL}/auth`;
 const ALARM_NAME = "gemini-bridge-refresh";
 const ALARM_PERIOD_MIN = 5;
 
+// Chrome MV3 strips Origin on fetches to host_permissions URLs, and Origin is a
+// forbidden header we can't set manually — server's extension-only check uses this instead.
+const EXT_HEADERS = { "X-Extension-Id": chrome.runtime.id };
+
+function bridgeFetch(url, init = {}) {
+  const headers = { ...EXT_HEADERS, ...(init.headers || {}) };
+  return fetch(url, { ...init, headers });
+}
+
 async function getCookies(provider) {
   const out = {};
   for (const name of provider.cookieNames) {
     const c = await chrome.cookies.get({ url: provider.cookieDomainUrl, name });
     if (c) out[name] = c.value;
   }
-  // Provider must declare required cookies as the first two entries (auth pair).
-  // If those are missing, treat as not-signed-in.
+  // First two cookieNames are the required auth pair; missing => not signed in.
   const [r1, r2] = provider.cookieNames;
   if (!out[r1] || !out[r2]) return null;
   return out;
@@ -29,19 +37,10 @@ async function setSelectedIndex(providerId, idx) {
 }
 
 async function fetchServerStatus() {
-  // /admin/status only exists in webai mode (the FastAPI worker).
-  // In g4f mode, that worker is replaced — /admin/status 404s but /v1/models still serves.
   try {
-    const adminRes = await fetch(`${SERVER_BASE_URL}/admin/status`);
-    if (adminRes.ok) {
-      return { ...(await adminRes.json()), reachable: true };
-    }
-    if (adminRes.status === 404) {
-      // No /admin endpoint — likely g4f mode. Probe /v1/models to confirm something's listening.
-      const modelsRes = await fetch(`${SERVER_BASE_URL}/v1/models`).catch(() => null);
-      if (modelsRes && modelsRes.ok) {
-        return { mode: "g4f", g4f_installed: true, reachable: true };
-      }
+    const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/status`);
+    if (res.ok) {
+      return { ...(await res.json()), reachable: true };
     }
     return { reachable: false };
   } catch {
@@ -69,7 +68,7 @@ async function pushProvider(provider, reason) {
   }
   const account_index = await getSelectedIndex(provider.id);
   try {
-    const res = await fetch(`${SERVER_BASE}/cookies/${provider.id}`, {
+    const res = await bridgeFetch(`${SERVER_BASE}/cookies/${provider.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cookies, account_index }),
@@ -89,7 +88,7 @@ async function discoverAccounts(provider) {
   const cookies = await getCookies(provider);
   if (!cookies) return [];
   try {
-    const res = await fetch(`${SERVER_BASE}/accounts/${provider.id}`, {
+    const res = await bridgeFetch(`${SERVER_BASE}/accounts/${provider.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cookies, account_index: 0 }),
@@ -111,14 +110,6 @@ async function pushAll(reason) {
     }
     return;
   }
-  // In g4f mode, /auth/cookies/* is gone (FastAPI worker is replaced).
-  // Mark cookie sync as paused — not failed — so the popup doesn't scream.
-  if (status.mode === "g4f") {
-    for (const p of PROVIDERS) {
-      await setStatus(p.id, { paused: true, reason, at: Date.now() });
-    }
-    return;
-  }
   await Promise.all(PROVIDERS.map((p) => pushProvider(p, reason)));
 }
 
@@ -136,17 +127,34 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) pushAll("alarm");
 });
 
+// Coalesce Google cookie-rotation bursts (one onChanged per cookie, 8+ per rotation)
+// into a single push. 2s is wide enough for typical bursts, short enough that a fresh
+// 1PSIDTS reaches the server before the next chat call. Manual syncs bypass this.
+const COOKIE_DEBOUNCE_MS = 2000;
+const _pushTimers = new Map();
+function schedulePushProvider(provider, reason) {
+  const existing = _pushTimers.get(provider.id);
+  if (existing) clearTimeout(existing);
+  const t = setTimeout(() => {
+    _pushTimers.delete(provider.id);
+    pushProvider(provider, reason);
+  }, COOKIE_DEBOUNCE_MS);
+  _pushTimers.set(provider.id, t);
+}
+
 chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
   if (removed) return;
   for (const p of PROVIDERS) {
     if (cookie.domain.endsWith(p.cookieFilter) && p.cookieNames.includes(cookie.name)) {
-      pushProvider(p, `cookie:${cookie.name}`);
+      schedulePushProvider(p, `cookie:${cookie.name}`);
       return;
     }
   }
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Cheap MV3 hygiene: drop messages from other extensions / external pages.
+  if (sender.id !== chrome.runtime.id) return false;
   (async () => {
     if (msg?.type === "sync-now") {
       await pushAll("manual");
@@ -166,7 +174,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ done: true });
     } else if (msg?.type === "reset-fallback") {
       try {
-        const res = await fetch(`${SERVER_BASE_URL}/admin/reset-fallback`, {
+        const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/reset-fallback`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
         });
@@ -174,18 +182,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }
-    } else if (msg?.type === "switch-mode") {
+    } else if (msg?.type === "select-gem") {
       try {
-        const res = await fetch(`${SERVER_BASE_URL}/admin/mode`, {
+        const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/gem`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: msg.mode }),
+          body: JSON.stringify({ gem_id: msg.gem_id || null }),
         });
-        const body = await res.text();
+        const body = await res.json().catch(() => ({}));
         sendResponse({ ok: res.ok, status: res.status, body });
       } catch (e) {
         sendResponse({ ok: false, error: e.message });
       }
+    } else if (msg?.type === "openrouter-update") {
+      try {
+        const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/openrouter`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(msg.patch || {}),
+        });
+        const body = await res.json().catch(() => ({}));
+        sendResponse({ ok: res.ok, status: res.status, body });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    } else {
+      // Always answer — silence hangs the popup until Chrome's 5s timeout.
+      sendResponse({ ok: false, error: `unknown message type: ${msg?.type}` });
     }
   })();
   return true;

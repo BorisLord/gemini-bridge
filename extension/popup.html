@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <style>
-    body { font-family: system-ui, sans-serif; width: 320px; padding: 12px; margin: 0; }
+    body { font-family: system-ui, sans-serif; width: 340px; padding: 12px; margin: 0; }
     h1 { font-size: 14px; margin: 0 0 10px; }
+    h2 { font-size: 12px; margin: 12px 0 6px; color: #555; text-transform: uppercase; letter-spacing: .5px; }
     .provider { margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #eee; }
     .provider:last-child { border-bottom: none; }
     .name { font-size: 12px; font-weight: 600; color: #1a1a1a; margin-bottom: 2px; }
@@ -12,15 +13,29 @@
     .ok { color: #137333; font-size: 12px; }
     .err { color: #c5221f; font-size: 12px; word-break: break-word; }
     .sub { font-size: 11px; color: #888; margin: 2px 0; }
-    .acctsel { width: 100%; margin: 4px 0; padding: 4px; font-size: 12px; }
+    .acctsel, .modelsel { width: 100%; margin: 4px 0; padding: 4px; font-size: 12px; }
+    .keyrow { display: flex; gap: 4px; margin: 4px 0; }
+    .keyrow input { flex: 1; padding: 4px; font-size: 12px; font-family: monospace; }
     button { padding: 5px 10px; font-size: 11px; cursor: pointer; margin-right: 4px; }
     .discover { background: #f0f0f0; border: 1px solid #ccc; }
     #sync { margin-top: 4px; background: #1a73e8; color: #fff; border: none; padding: 6px 12px; }
+    .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .toggle input { transform: scale(1.1); }
+    .or-block { padding: 8px; background: #fafafa; border-radius: 4px; margin-bottom: 10px; }
+    .or-block.disabled { opacity: 0.6; }
   </style>
 </head>
 <body>
   <h1>Gemini Bridge</h1>
   <div id="server" class="server">Checking server…</div>
+
+  <h2>Gemini Gem</h2>
+  <div id="gem" class="or-block">Loading…</div>
+
+  <h2>OpenRouter fallback</h2>
+  <div id="openrouter" class="or-block">Loading…</div>
+
+  <h2>Providers</h2>
   <div id="providers">Loading…</div>
   <button id="sync">Sync now</button>
   <script type="module" src="popup.js"></script>
