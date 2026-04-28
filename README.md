@@ -26,13 +26,22 @@ git clone https://github.com/BorisLord/gemini-bridge && cd gemini-bridge
 ./start.sh        # first run sets up venv + deps, then launches on :6969
 ```
 
-**Docker** — needs Docker ≥ 24 with the `compose` plugin.
+**Docker** — needs Docker ≥ 24. Pre-built image from GHCR (no clone required):
+
+```bash
+docker run -d --name gemini-bridge \
+  -p 127.0.0.1:6969:6969 \
+  -v gemini-bridge-data:/data \
+  ghcr.io/borislord/gemini-bridge:latest
+```
+
+Or build locally with the bundled compose file (needs the `compose` plugin):
 
 ```bash
 docker compose up --build -d
 ```
 
-The container binds to `127.0.0.1:6969` and persists `config.conf` in a named volume.
+Both bind to `127.0.0.1:6969` and persist `config.conf` in a named volume.
 
 **Systemd (user service, Linux)** — same prereqs as Native; auto-starts at boot:
 
