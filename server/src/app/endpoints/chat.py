@@ -287,6 +287,30 @@ def _is_gemini_model(name: str) -> bool:
     return name.startswith("gemini-")
 
 
+# Mirrors `gemini_webapi.constants` — the IDs the upstream library accepts.
+# Powers /v1/models so OpenAI-speaking clients (Open WebUI, AnythingLLM, …)
+# can populate their model pickers automatically.
+GEMINI_MODEL_IDS = [
+    "gemini-3-pro",
+    "gemini-3-flash",
+    "gemini-3-flash-thinking",
+    "gemini-3-pro-plus",
+    "gemini-3-flash-plus",
+    "gemini-3-flash-thinking-plus",
+    "gemini-3-pro-advanced",
+    "gemini-3-flash-advanced",
+    "gemini-3-flash-thinking-advanced",
+]
+
+
+@router.get("/v1/models")
+async def list_models():
+    now = int(time.time())
+    items = [{"id": m, "object": "model", "created": now, "owned_by": "gemini-bridge"}
+             for m in GEMINI_MODEL_IDS]
+    return {"object": "list", "data": items}
+
+
 def _first_message(or_resp: dict) -> dict:
     """Extract `choices[0].message`. Fails loudly when `choices` is missing/empty —
     we've seen 200s with `{"choices": []}` on truncated upstream errors."""
