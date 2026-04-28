@@ -1,6 +1,5 @@
 // Suffix → Google subscription needed: none = Free, `-plus` = AI Pro, `-advanced` = AI Ultra.
-// Calling a tier you don't pay for silently downgrades. `*:free` IDs are
-// routed directly to OpenRouter (needs OPENROUTER_API_KEY).
+// Calling a tier you don't pay for silently downgrades.
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
@@ -9,20 +8,15 @@
       "name": "Gemini Web",
       "options": { "baseURL": "http://localhost:6969/v1", "apiKey": "dummy" },
       "models": {
-        "gemini-3-pro":                      { "name": "Gemini 3 Pro (Free)",                "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash":                    { "name": "Gemini 3 Flash (Free)",              "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking":           { "name": "Gemini 3 Flash Thinking (Free)",     "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro-plus":                 { "name": "Gemini 3 Pro (AI Pro)",              "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-plus":               { "name": "Gemini 3 Flash (AI Pro)",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-plus":      { "name": "Gemini 3 Flash Thinking (AI Pro)",   "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro-advanced":             { "name": "Gemini 3 Pro (AI Ultra)",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-advanced":           { "name": "Gemini 3 Flash (AI Ultra)",          "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-advanced":  { "name": "Gemini 3 Flash Thinking (AI Ultra)", "limit": { "context": 1000000, "output": 65536 } },
-        "qwen/qwen3-coder:free":                    { "name": "Qwen3 Coder (free, OpenRouter)",         "limit": { "context": 262000, "output": 8192 } },
-        "z-ai/glm-4.5-air:free":                    { "name": "GLM 4.5 Air (free, OpenRouter)",         "limit": { "context": 131072, "output": 8192 } },
-        "openai/gpt-oss-120b:free":                 { "name": "GPT-OSS 120B (free, OpenRouter)",        "limit": { "context": 131072, "output": 8192 } },
-        "meta-llama/llama-3.3-70b-instruct:free":   { "name": "Llama 3.3 70B (free, OpenRouter)",       "limit": { "context":  65536, "output": 8192 } },
-        "nvidia/nemotron-3-super-120b-a12b:free":   { "name": "Nemotron 3 Super 120B (free, OpenRouter)", "limit": { "context": 262144, "output": 8192 } }
+        "gemini-3-pro":                      { "name": "Gemini 3 Pro · Free",                "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash":                    { "name": "Gemini 3 Flash · Free",              "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking":           { "name": "Gemini 3 Flash Thinking · Free",     "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-pro-plus":                 { "name": "Gemini 3 Pro · AI Pro",              "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-plus":               { "name": "Gemini 3 Flash · AI Pro",            "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking-plus":      { "name": "Gemini 3 Flash Thinking · AI Pro",   "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-pro-advanced":             { "name": "Gemini 3 Pro · AI Ultra",            "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-advanced":           { "name": "Gemini 3 Flash · AI Ultra",          "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking-advanced":  { "name": "Gemini 3 Flash Thinking · AI Ultra", "limit": { "context": 1000000, "output": 65536 } }
       }
     }
   }
