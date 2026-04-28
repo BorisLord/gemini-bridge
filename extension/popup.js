@@ -64,28 +64,30 @@ function renderServer(status) {
 }
 
 function renderGem(status) {
+  const headerCb = document.getElementById("gem-enabled");
   const $ = document.getElementById("gem");
   $.replaceChildren();
   if (!status || !status.reachable) {
-    const div = document.createElement("div");
-    div.className = "sub";
-    div.textContent = "Server unreachable.";
-    $.appendChild(div);
+    headerCb.checked = false;
+    headerCb.disabled = true;
+    $.classList.add("hidden");
     return;
   }
+  headerCb.disabled = false;
   const selected = (status.gem && status.gem.selected_id) || "";
+  // Section is "on" if a Gem ID is currently applied. User checks the box to
+  // reveal the input; unchecking clears the active Gem server-side.
+  const enabled = !!selected;
+  headerCb.checked = enabled;
+  $.classList.toggle("hidden", !enabled);
+  if (!enabled) return;
 
   const current = document.createElement("div");
-  current.className = "sub";
-  if (selected) {
-    current.classList.add("ok");
-    current.textContent = "Active Gem ID: ";
-    const code = document.createElement("code");
-    code.textContent = selected;
-    current.appendChild(code);
-  } else {
-    current.textContent = "No Gem applied (default Gemini).";
-  }
+  current.className = "sub ok";
+  current.textContent = "Active Gem ID: ";
+  const code = document.createElement("code");
+  code.textContent = selected;
+  current.appendChild(code);
   $.appendChild(current);
 
   const row = document.createElement("div");
@@ -93,7 +95,7 @@ function renderGem(status) {
   const input = document.createElement("input");
   input.type = "text";
   input.id = "gem-input";
-  input.placeholder = "Paste Gem URL or ID (empty to clear)";
+  input.placeholder = "Paste Gem URL or ID to switch";
   const apply = document.createElement("button");
   apply.id = "gem-apply";
   apply.textContent = "Apply";
@@ -103,9 +105,7 @@ function renderGem(status) {
 
   const hint = document.createElement("div");
   hint.className = "sub";
-  hint.append(
-    "Open your Gem on ",
-  );
+  hint.append("Open your Gem on ");
   const a = document.createElement("a");
   a.href = "https://gemini.google.com/gems/view";
   a.target = "_blank";
@@ -118,14 +118,51 @@ function renderGem(status) {
   $.appendChild(hint);
 }
 
+async function applyGemFromInput() {
+  const raw = (document.getElementById("gem-input")?.value || "").trim();
+  await chrome.runtime.sendMessage({ type: "select-gem", gem_id: raw });
+  setTimeout(render, 200);
+}
+
+function renderGemPrompt() {
+  // Shown when the user toggles Gem ON but no Gem is active yet.
+  // Bind directly here — render() doesn't re-run after a toggle click, so the
+  // global gem-apply binding wouldn't catch this button.
+  const $ = document.getElementById("gem");
+  $.classList.remove("hidden");
+  $.replaceChildren();
+  const row = document.createElement("div");
+  row.className = "keyrow";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "gem-input";
+  input.placeholder = "Paste Gem URL or ID";
+  const apply = document.createElement("button");
+  apply.id = "gem-apply";
+  apply.textContent = "Apply";
+  apply.addEventListener("click", applyGemFromInput);
+  row.appendChild(input);
+  row.appendChild(apply);
+  $.appendChild(row);
+}
+
 function renderOpenRouter(status) {
+  const headerCb = document.getElementById("or-enabled");
   const $ = document.getElementById("openrouter");
   if (!status || !status.reachable) {
+    headerCb.checked = false;
+    headerCb.disabled = true;
+    $.classList.add("hidden");
     $.innerHTML = `<div class="sub">Server unreachable.</div>`;
     return;
   }
+  headerCb.disabled = false;
   const or = status.openrouter || {};
   const enabled = !!or.enabled;
+  headerCb.checked = enabled;
+  $.classList.toggle("hidden", !enabled);
+  if (!enabled) return;
+
   const hasKey = !!or.has_api_key;
   const models = or.available_models || [];
   const opts = models.map(m =>
@@ -136,13 +173,8 @@ function renderOpenRouter(status) {
   const keyHint = hasKey
     ? `<span class="ok">key set: ${esc(or.api_key_masked || "•••")}</span>`
     : `<span class="err">no API key</span>`;
-  $.className = "or-block" + (enabled ? "" : " disabled");
   $.innerHTML = `
-    <label class="toggle">
-      <input id="or-enabled" type="checkbox" ${enabled ? "checked" : ""} />
-      <span>Enable OpenRouter fallback (free models)</span>
-    </label>
-    <div class="sub" style="margin-top:6px">${keyHint}</div>
+    <div class="sub">${keyHint}</div>
     <div class="keyrow">
       <input id="or-key" type="password" placeholder="sk-or-v1-… (paste to set, leave blank to clear)" />
       <button id="or-key-save">Save</button>
@@ -168,16 +200,8 @@ async function render() {
     setTimeout(render, 200);
   });
 
-  document.getElementById("gem-apply")?.addEventListener("click", async () => {
-    const input = document.getElementById("gem-input");
-    const raw = (input?.value || "").trim();
-    await chrome.runtime.sendMessage({ type: "select-gem", gem_id: raw });
-    setTimeout(render, 200);
-  });
+  document.getElementById("gem-apply")?.addEventListener("click", applyGemFromInput);
 
-  document.getElementById("or-enabled")?.addEventListener("change", (e) => {
-    applyOpenRouter({ enabled: e.target.checked });
-  });
   document.getElementById("or-key-save")?.addEventListener("click", () => {
     const v = document.getElementById("or-key").value;
     applyOpenRouter({ api_key: v });
@@ -283,6 +307,20 @@ async function render() {
 document.getElementById("sync").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "sync-now" });
   setTimeout(render, 400);
+});
+
+// Section-header toggles. Bound once at popup load — they survive re-renders.
+document.getElementById("or-enabled").addEventListener("change", (e) => {
+  applyOpenRouter({ enabled: e.target.checked });
+});
+
+document.getElementById("gem-enabled").addEventListener("change", async (e) => {
+  if (e.target.checked) {
+    renderGemPrompt();
+  } else {
+    await chrome.runtime.sendMessage({ type: "select-gem", gem_id: "" });
+    setTimeout(render, 200);
+  }
 });
 
 (async () => {

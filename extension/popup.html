@@ -6,6 +6,8 @@
     body { font-family: system-ui, sans-serif; width: 340px; padding: 12px; margin: 0; }
     h1 { font-size: 14px; margin: 0 0 10px; }
     h2 { font-size: 12px; margin: 12px 0 6px; color: #555; text-transform: uppercase; letter-spacing: .5px; }
+    .section-header { margin: 12px 0 6px; }
+    .section-header .toggle { font-size: 12px; color: #555; text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
     .provider { margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #eee; }
     .provider:last-child { border-bottom: none; }
     .name { font-size: 12px; font-weight: 600; color: #1a1a1a; margin-bottom: 2px; }
@@ -19,21 +21,31 @@
     button { padding: 5px 10px; font-size: 11px; cursor: pointer; margin-right: 4px; }
     .discover { background: #f0f0f0; border: 1px solid #ccc; }
     #sync { margin-top: 4px; background: #1a73e8; color: #fff; border: none; padding: 6px 12px; }
-    .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
     .toggle input { transform: scale(1.1); }
     .or-block { padding: 8px; background: #fafafa; border-radius: 4px; margin-bottom: 10px; }
-    .or-block.disabled { opacity: 0.6; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
   <h1>Gemini Bridge</h1>
   <div id="server" class="server">Checking server…</div>
 
-  <h2>Gemini Gem</h2>
-  <div id="gem" class="or-block">Loading…</div>
+  <div class="section-header">
+    <label class="toggle">
+      <input id="gem-enabled" type="checkbox" />
+      <span>Gemini Gem</span>
+    </label>
+  </div>
+  <div id="gem" class="or-block hidden">Loading…</div>
 
-  <h2>OpenRouter fallback</h2>
-  <div id="openrouter" class="or-block">Loading…</div>
+  <div class="section-header">
+    <label class="toggle">
+      <input id="or-enabled" type="checkbox" />
+      <span>OpenRouter fallback</span>
+    </label>
+  </div>
+  <div id="openrouter" class="or-block hidden">Loading…</div>
 
   <h2>Providers</h2>
   <div id="providers">Loading…</div>
