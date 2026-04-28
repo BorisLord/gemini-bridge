@@ -1,17 +1,36 @@
-FROM python:3.13-slim
+# syntax=docker/dockerfile:1.7
 
-# uv for fast dependency install
-RUN pip install --no-cache-dir uv
+# Stage 1 — builder: build the venv with uv (binary copied from upstream).
+FROM python:3.13-slim AS builder
+
+# uv as a single static binary; pin for reproducibility.
+COPY --from=ghcr.io/astral-sh/uv:0.11.8 /uv /usr/local/bin/uv
+
+ENV UV_LINK_MODE=copy
 
 WORKDIR /app/server
-COPY server/ ./
 
-RUN uv venv --python 3.13 \
- && uv pip install --no-cache -q -r requirements.txt
+# Deps layer caches independently of source — re-runs only when requirements.txt changes.
+COPY server/requirements.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv --python 3.13 .venv \
+ && uv pip install --python .venv/bin/python -r requirements.txt \
+ && find .venv -depth \
+      \( -type d \( -name '__pycache__' -o -name 'tests' -o -name 'test' \) \
+      -o -type f \( -name '*.pyc' -o -name '*.pyi' \) \) \
+      -exec rm -rf '{}' +
 
+# Stage 2 — runtime: copy venv only; uv stays out of the final image.
+FROM python:3.13-slim
+WORKDIR /app/server
+COPY --from=builder /app/server/.venv /app/server/.venv
+COPY server/src ./src
+COPY server/pyproject.toml server/config.conf.example server/LICENSE ./
 RUN cp config.conf.example /opt/config.conf.default
 
-ENV PATH="/app/server/.venv/bin:$PATH"
+ENV PATH="/app/server/.venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 6969
 
