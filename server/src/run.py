@@ -14,8 +14,8 @@ except ImportError:
     except ImportError:
         tomli = None
 
-from app.config import load_config
-from app.main import app as webai_app
+from app.config import CONFIG
+from app.main import app
 from app.services.gemini_client import init_gemini_client
 
 
@@ -32,9 +32,9 @@ def get_app_info() -> Tuple[str, str]:
     try:
         with open("pyproject.toml", "rb") as f:
             toml_data = tomli.load(f)
-        poetry_data = toml_data.get("tool", {}).get("poetry", {})
-        name = poetry_data.get("name", "gemini-bridge").replace("-", " ").title()
-        version = poetry_data.get("version", "N/A")
+        project_data = toml_data.get("project", {})
+        name = project_data.get("name", "gemini-bridge").replace("-", " ").title()
+        version = project_data.get("version", "N/A")
         return name, version
     except (FileNotFoundError, KeyError) as e:
         print(f"[warn] Failed to read pyproject.toml: {e}", file=sys.stderr)
@@ -46,18 +46,14 @@ def print_server_info(host: str, port: int):
     app_name, app_version = get_app_info()
     print("\n" + "=" * 80)
     print(f"{Colors.BOLD}{Colors.YELLOW}{f'{app_name} v{app_version}'.center(80)}{Colors.RESET}")
-    print("Gemini Bridge — OpenAI-compatible API on top of gemini.google.com".center(80))
+    print(f"{app_name} — OpenAI-compatible API on top of gemini.google.com".center(80))
     print("=" * 80)
     print("\nServices:")
     print(f"  - Docs:   {base_url}/docs")
     print(f"  - Status: {base_url}/admin/status")
-    try:
-        CONFIG = load_config()
-        print(f"\nConfig: browser={CONFIG['Browser']['name']} model={CONFIG['Gemini']['default_model']}")
-    except Exception:
-        pass
+    print(f"\nConfig: browser={CONFIG['Browser']['name']} model={CONFIG['Gemini']['default_model']}")
     print("\nEndpoints:")
-    paths = sorted({route.path for route in webai_app.routes if isinstance(route, APIRoute)})
+    paths = sorted({route.path for route in app.routes if isinstance(route, APIRoute)})
     for path in paths:
         if path not in ("/docs", "/redoc", "/openapi.json"):
             print(f"  - {base_url}{path}")
@@ -82,7 +78,7 @@ if __name__ == "__main__":
 
     print_server_info(args.host, args.port)
 
-    config = uvicorn.Config(webai_app, host=args.host, port=args.port, reload=args.reload, log_config=None)
+    config = uvicorn.Config(app, host=args.host, port=args.port, reload=args.reload, log_config=None)
     try:
         uvicorn.Server(config).run()
     except KeyboardInterrupt:
