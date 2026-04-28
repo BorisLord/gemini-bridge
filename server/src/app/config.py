@@ -25,7 +25,7 @@ def load_config(config_file: str = "config.conf") -> configparser.ConfigParser:
     if "Proxy" not in config:
         config["Proxy"] = {"http_proxy": ""}
     if "OpenRouter" not in config:
-        config["OpenRouter"] = {"enabled": "true", "api_key": "", "model": ""}
+        config["OpenRouter"] = {"enabled": "false", "api_key": "", "model": ""}
 
     try:
         with open(config_file, "w", encoding="utf-8") as f:

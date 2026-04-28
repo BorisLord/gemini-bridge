@@ -32,7 +32,7 @@ def _initial_enabled() -> bool:
     env = os.environ.get("GEMINI_BRIDGE_FALLBACK_ENABLED")
     if env is not None:
         return env.lower() in ("1", "true", "yes")
-    cfg = CONFIG["OpenRouter"].get("enabled", "true") if "OpenRouter" in CONFIG else "true"
+    cfg = CONFIG["OpenRouter"].get("enabled", "false") if "OpenRouter" in CONFIG else "false"
     return cfg.lower() in ("1", "true", "yes")
 
 
