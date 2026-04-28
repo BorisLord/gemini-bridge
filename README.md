@@ -8,7 +8,7 @@ Local FastAPI + Chrome extension that exposes your **Google Gemini subscription*
 ```
 Chrome ──cookies──▶ localhost:6969 ──/v1/chat/completions──▶ OpenCode / curl / …
                                           │
-                                          └─(on Gemini quota/error)─▶ OpenRouter (free)
+                                          └─(opt-in fallback on quota/error)─▶ OpenRouter (free)
 ```
 
 ## Why
@@ -44,8 +44,6 @@ systemctl --user daemon-reload
 systemctl --user enable --now gemini-bridge
 loginctl enable-linger $USER   # start without an active login session
 ```
-
-Logs: `journalctl --user -u gemini-bridge -f`.
 
 Then in Chrome: `chrome://extensions/` → *Developer mode* → *Load unpacked* → pick `extension/`. Visit `https://gemini.google.com` once, click the extension icon — status should say **✓ Connected**. Quick check: `curl http://localhost:6969/healthz` → `{"status":"ok"}`.
 
@@ -84,11 +82,11 @@ Open your Gem on `gemini.google.com`, copy the URL (e.g. `https://gemini.google.
 
 ## OpenRouter fallback
 
-When Gemini fails (429 / 401 / 502 / 504), the bridge transparently retries on OpenRouter free models in the same HTTP round-trip — clients see a 200 instead of an error. Toggleable from the popup, no restart.
+When enabled, the bridge transparently retries Gemini failures (429 / 401 / 502 / 504) on OpenRouter free models in the same HTTP round-trip — clients see a 200 instead of an error. Toggleable from the popup, no restart.
 
-Get a free key at [openrouter.ai/keys](https://openrouter.ai/keys), then set it via `OPENROUTER_API_KEY=…`, `[OpenRouter] api_key=…` in `config.conf`, or the popup. Defaults: enabled, model `qwen/qwen3-coder:free`. Other curated free picks: `z-ai/glm-4.5-air:free`, `openai/gpt-oss-120b:free`, `meta-llama/llama-3.3-70b-instruct:free`, `nvidia/nemotron-3-super-120b-a12b:free` — all support tool calls.
+**Off by default** — flip the popup toggle, set `GEMINI_BRIDGE_FALLBACK_ENABLED=true`, or `[OpenRouter] enabled=true` in `config.conf`. Get a free key at [openrouter.ai/keys](https://openrouter.ai/keys), then set `OPENROUTER_API_KEY=…`, `[OpenRouter] api_key=…`, or paste it in the popup. Default model: `qwen/qwen3-coder:free`. Other curated free picks: `z-ai/glm-4.5-air:free`, `openai/gpt-oss-120b:free`, `meta-llama/llama-3.3-70b-instruct:free`, `nvidia/nemotron-3-super-120b-a12b:free` — all support tool calls.
 
-After one successful fallback, the next ~1h of requests bypass Gemini directly (`reason=sticky`). Reset via the popup *Retry Gemini now* button or `POST /admin/reset-fallback`. Override the window with `GEMINI_BRIDGE_FALLBACK_STICKY_HOURS=<n>` (`0` disables). Pass a non-Gemini model ID to bypass Gemini entirely (passthrough).
+After one successful fallback, the next ~1h of requests bypass Gemini directly (`reason=sticky`). Reset via the popup *Retry Gemini now* button or `POST /admin/reset-fallback`. Override the window with `GEMINI_BRIDGE_FALLBACK_STICKY_HOURS=<n>` (`0` disables). Pass a non-Gemini model ID (e.g. `qwen/qwen3-coder:free`) to route straight to OpenRouter without ever calling Gemini (passthrough).
 
 Visibility: response header `X-Bridge-Fallback: openrouter:<model>:<reason>`, response `model` field becomes `gemini-3-pro→openrouter:qwen/qwen3-coder:free`. Free-tier daily caps apply (~50 req/day per model); deposit $10 on OpenRouter to raise to ~1000.
 
@@ -104,7 +102,7 @@ OPENROUTER_API_KEY=sk-or-v1-…   # optional
 GEMINI_BRIDGE_GEM_ID=           # optional
 ```
 
-`__Secure-1PSIDTS` auto-rotates after first use; re-paste `__Secure-1PSID` only when you log out. Alternatives: write the same keys under `[Cookies]` / `[OpenRouter]` in `server/config.conf`, or export pure env vars (12-factor / k8s).
+Re-paste `__Secure-1PSID` only when you log out (rotation of `_1PSIDTS` is automatic, see Install). Alternatives: write the same keys under `[Cookies]` / `[OpenRouter]` in `server/config.conf`, or export pure env vars (12-factor / k8s).
 
 Smoke test:
 
@@ -128,7 +126,7 @@ Precedence everywhere: **env > `config.conf` > extension/popup runtime**.
 | `GEMINI_BRIDGE_ACCOUNT_INDEX` | `0` | Multi-account `/u/N` selection. |
 | `GEMINI_BRIDGE_GEM_ID` | unset | Pre-select a Gem at boot. |
 | `OPENROUTER_API_KEY` | unset | Bearer for fallback. |
-| `GEMINI_BRIDGE_FALLBACK_ENABLED` | `true` | Initial toggle. |
+| `GEMINI_BRIDGE_FALLBACK_ENABLED` | `false` | Initial toggle. |
 | `GEMINI_BRIDGE_FALLBACK_MODEL` | `qwen/qwen3-coder:free` | Initial OpenRouter model. |
 | `GEMINI_BRIDGE_FALLBACK_STICKY_HOURS` | `1` | Sticky window after success. `0` disables. |
 | `GEMINI_BRIDGE_OPENROUTER_TIMEOUT_SECONDS` | `60` | Hard cutoff per OpenRouter call. |
@@ -138,6 +136,7 @@ Precedence everywhere: **env > `config.conf` > extension/popup runtime**.
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/v1/chat/completions` | none | OpenAI chat. Streaming + tool calls. |
+| `GET` | `/v1/models` | none | OpenAI model list (drives picker auto-discovery). |
 | `GET` | `/healthz` | none | Liveness probe. |
 | `POST` | `/auth/cookies/{provider}` | extension | Push fresh Google cookies. |
 | `POST` | `/auth/accounts/{provider}` | extension | Probe `/u/0…7` for signed-in emails. |
@@ -177,7 +176,7 @@ Override globally with `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS=<n>`.
 | `systemd/` | User-service unit. |
 | `start.sh` | Setup-on-first-run launcher. |
 
-Tests: `cd server && .venv/bin/python -m unittest discover tests -v`. Covers the tool-call shim, Gem URL parsing, OpenRouter state machine, admin origin checks.
+Tests: `cd server && python -m unittest discover tests -v` (with the venv created by `./start.sh` activated, or deps installed). Covers the chat handler, tool-call shim, Gem URL parsing, OpenRouter state machine, admin origin checks, `/v1/models` discovery.
 
 ## License
 
