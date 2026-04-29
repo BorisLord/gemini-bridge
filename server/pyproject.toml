@@ -16,5 +16,5 @@ dependencies = [
     "uvicorn[standard]>=0.46.0,<0.50.0",
     "tomli>=2.2.1",
     "pywin32==311 ; sys_platform == 'win32'",
-    "pycryptodomex>=3.23.0,<4.0.0 ; sys_platform == 'win32'",
+    "pycryptodomex>=3.21.0,<4.0.0 ; sys_platform == 'win32'",
 ]
