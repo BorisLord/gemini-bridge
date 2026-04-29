@@ -16,7 +16,7 @@ except ImportError:
 
 from app.config import CONFIG
 from app.main import app
-from app.services.gemini_client import init_gemini_client
+from app.services.gemini_client import _resolve_cookies
 
 
 class Colors:
@@ -70,9 +70,12 @@ if __name__ == "__main__":
     parser.add_argument("--reload", action="store_true", help="Enable auto-reloading")
     args = parser.parse_args()
 
-    print("INFO:     Initializing Gemini client…")
-    if asyncio.run(init_gemini_client()):
-        print(f"INFO:     ✅ {Colors.CYAN}Gemini client initialized{Colors.RESET}")
+    # Don't init the Gemini client here — uvicorn's lifespan does it inside the
+    # worker, on the right event loop. We only peek at cookie availability so
+    # the boot banner can hint whether the user needs the extension running.
+    psid, psidts = _resolve_cookies()
+    if psid and psidts:
+        print(f"INFO:     ✅ {Colors.CYAN}Gemini cookies found — initializing on startup{Colors.RESET}")
     else:
         print(f"INFO:     ⏳ {Colors.CYAN}Waiting for extension to push cookies{Colors.RESET}")
 
