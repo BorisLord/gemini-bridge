@@ -6,9 +6,12 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from app.endpoints.chat import (  # noqa: E402
+    _build_prompt_from_messages,
     _build_tools_system_prompt,
     _extract_tool_calls,
     _maybe_truncate_tool_result,
+    _strip_md_wrappers,
+    _trim_messages_to_fit,
     MAX_TOOL_RESULT_CHARS,
 )
 
@@ -112,6 +115,123 @@ class TestTruncateToolResult(unittest.TestCase):
         self.assertTrue(truncated)
         self.assertIn("HEAD-MARKER", out)
         self.assertIn("TAIL-MARKER", out)
+
+
+class TestStripMdWrappers(unittest.TestCase):
+    def test_collapses_identical_url_link(self):
+        self.assertEqual(
+            _strip_md_wrappers("[https://opencode.ai/docs](https://opencode.ai/docs)"),
+            "https://opencode.ai/docs",
+        )
+
+    def test_keeps_url_target_when_label_differs(self):
+        self.assertEqual(
+            _strip_md_wrappers("[opencode docs](https://opencode.ai/docs)"),
+            "https://opencode.ai/docs",
+        )
+
+    def test_keeps_path_target_when_label_differs(self):
+        self.assertEqual(
+            _strip_md_wrappers("[entrypoint](src/run.py)"),
+            "src/run.py",
+        )
+
+    def test_keeps_label_when_target_is_neither_url_nor_path(self):
+        self.assertEqual(
+            _strip_md_wrappers("[user_42](placeholder)"),
+            "user_42",
+        )
+
+    def test_strips_code_span(self):
+        self.assertEqual(_strip_md_wrappers("`/abs/path/file.py`"), "/abs/path/file.py")
+
+    def test_passthrough_plain_string(self):
+        self.assertEqual(_strip_md_wrappers("https://example.com"), "https://example.com")
+
+    def test_does_not_touch_embedded_markdown_in_long_content(self):
+        body = "First line.\nSee [docs](https://x) for details.\nEnd."
+        self.assertEqual(_strip_md_wrappers(body), body)
+
+    def test_recurses_into_dict_and_list(self):
+        out = _strip_md_wrappers({
+            "url": "[https://a](https://a)",
+            "tags": ["`tag1`", "plain"],
+            "nested": {"path": "`/etc/hosts`"},
+            "count": 7,
+        })
+        self.assertEqual(out, {
+            "url": "https://a",
+            "tags": ["tag1", "plain"],
+            "nested": {"path": "/etc/hosts"},
+            "count": 7,
+        })
+
+    def test_records_changes_when_collector_passed(self):
+        changes: list = []
+        _strip_md_wrappers({"url": "[https://x](https://x)", "ok": "raw"}, changes)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0], ("[https://x](https://x)", "https://x"))
+
+
+class TestExtractToolCallsSanitization(unittest.TestCase):
+    def test_strips_markdown_url_in_extracted_call(self):
+        text = (
+            '<<TOOL_CALL>>\n'
+            '{"name": "webfetch", "arguments": {"url": "[https://opencode.ai/docs](https://opencode.ai/docs)"}}\n'
+            '<<END>>'
+        )
+        calls = _extract_tool_calls(text, {"webfetch"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            json.loads(calls[0]["function"]["arguments"]),
+            {"url": "https://opencode.ai/docs"},
+        )
+
+
+class TestTrimMessagesToFit(unittest.TestCase):
+    def test_under_cap_passthrough(self):
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        trimmed, dropped = _trim_messages_to_fit(msgs, None, 8000, 1_000_000)
+        # Plenty of room — original list returned untouched.
+        self.assertEqual(dropped, 0)
+        rendered, _, _ = _build_prompt_from_messages(trimmed, None, 8000)
+        self.assertIn("User: hi", rendered)
+        self.assertIn("Assistant: hello", rendered)
+
+    def test_drops_oldest_until_fits(self):
+        big = "X" * 5000
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": f"old {big}"},
+            {"role": "assistant", "content": f"old reply {big}"},
+            {"role": "user", "content": f"middle {big}"},
+            {"role": "assistant", "content": f"middle reply {big}"},
+            {"role": "user", "content": "latest question"},
+        ]
+        trimmed, dropped = _trim_messages_to_fit(msgs, None, 8000, 6000)
+        rendered, _, _ = _build_prompt_from_messages(trimmed, None, 8000)
+        self.assertLessEqual(len(rendered), 6000)
+        # System message is preserved.
+        self.assertIn("System: SYS", rendered)
+        # Tail kept.
+        self.assertIn("latest question", rendered)
+        # Placeholder injected.
+        self.assertIn("Earlier conversation elided", rendered)
+        self.assertGreater(dropped, 0)
+
+    def test_keeps_at_least_last_message(self):
+        # Even if the very last message alone is too big, we still emit it.
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "X" * 10000},
+        ]
+        trimmed, _ = _trim_messages_to_fit(msgs, None, 8000, 100)
+        roles = [m["role"] for m in trimmed]
+        self.assertIn("user", roles)
 
 
 if __name__ == "__main__":

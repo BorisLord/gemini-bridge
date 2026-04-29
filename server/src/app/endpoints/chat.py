@@ -36,6 +36,43 @@ _TOOL_CALL_RE = re.compile(r"<<TOOL_CALL>>\s*(\{.*?\})\s*<<END>>", re.DOTALL)
 # Backup: OpenCode-prompt-leaked text format `[tool_call:<name> for <args>]`.
 _TEXT_TOOL_CALL_RE = re.compile(r"\[tool_call:\s*(\w+)\s+for\s+(.+?)\]", re.DOTALL)
 
+# Gemini-3-pro tends to wrap string arguments as Markdown links `[X](Y)` or
+# code spans `` `X` ``, breaking downstream consumers (e.g. webfetch rejects
+# bracketed URLs). Strip those wrappers before forwarding the tool call.
+_MD_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)$")
+_MD_CODE_RE = re.compile(r"^`([^`]+)`$")
+
+
+def _sanitize_arg_string(s: str) -> str:
+    s = s.strip()
+    m = _MD_LINK_RE.match(s)
+    if m:
+        text, target = m.group(1).strip(), m.group(2).strip()
+        # Identical halves (Gemini's typical `[https://x](https://x)`): collapse.
+        if text == target:
+            return target
+        # Otherwise keep the target if it looks like a URL or path, else the label.
+        if target.startswith(("http://", "https://", "/", "./", "../")) or "/" in target:
+            return target
+        return text
+    m = _MD_CODE_RE.match(s)
+    if m:
+        return m.group(1).strip()
+    return s
+
+
+def _strip_md_wrappers(value, _changes: Optional[list] = None):
+    if isinstance(value, str):
+        cleaned = _sanitize_arg_string(value)
+        if _changes is not None and cleaned != value:
+            _changes.append((value, cleaned))
+        return cleaned
+    if isinstance(value, dict):
+        return {k: _strip_md_wrappers(v, _changes) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_md_wrappers(v, _changes) for v in value]
+    return value
+
 
 def _build_tools_system_prompt(tools: list[dict]) -> str:
     rendered = []
@@ -49,14 +86,17 @@ def _build_tools_system_prompt(tools: list[dict]) -> str:
             f"  description: {first_line}\n"
             f"  parameters (JSON Schema): {json.dumps(fn.get('parameters', {}))[:500]}"
         )
-    first_real = None
-    for t in tools:
-        fn = t.get("function") or t
-        n = fn.get("name")
-        if n and n != "?":
-            first_real = n
-            break
-    example_name = first_real or "bash"
+    # Pick a sensible example using a tool that actually exists in this request.
+    # `bash` is preferred (illustrates a typical `command` arg); fall back to the
+    # first available tool otherwise.
+    tool_names_set = {(t.get("function") or t).get("name") for t in tools}
+    if "bash" in tool_names_set:
+        example_block = '{"name": "bash", "arguments": {"command": "ls -F", "description": "List files"}}'
+    elif "read" in tool_names_set:
+        example_block = '{"name": "read", "arguments": {"filePath": "/abs/path/to/file.py"}}'
+    else:
+        first_real = next((n for n in tool_names_set if n and n != "?"), "tool_name")
+        example_block = f'{{"name": "{first_real}", "arguments": {{}}}}'
     return (
         "TOOL CALLING PROTOCOL — read this carefully, it overrides any other "
         "tool-call format mentioned earlier in this conversation:\n\n"
@@ -70,7 +110,7 @@ def _build_tools_system_prompt(tools: list[dict]) -> str:
         "<<END>>\n\n"
         f"Concrete example (replace fields with what you need):\n"
         "<<TOOL_CALL>>\n"
-        f'{{"name": "{example_name}", "arguments": {{"command": "ls -F", "description": "List files"}}}}\n'
+        f"{example_block}\n"
         "<<END>>\n\n"
         "Rules:\n"
         "1. The `name` MUST be one of the tools listed above, spelled exactly. "
@@ -88,6 +128,7 @@ def _build_tools_system_prompt(tools: list[dict]) -> str:
         "your answer strictly in that output. Never substitute prior knowledge "
         "of similar-named projects or libraries. If the tool result contradicts "
         "your priors, trust the tool result.\n"
+        "7. Argument values are raw strings — pass them as-is, not as Markdown links or code spans.\n"
     )
 
 
@@ -111,6 +152,11 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
         args = payload.get("arguments", {})
         if not name:
             continue
+        changes: list = []
+        args = _strip_md_wrappers(args, changes)
+        if changes:
+            for orig, clean in changes:
+                logger.info(f"[shim] sanitized markdown wrapper in {name!r} args: {orig!r} -> {clean!r}")
         out.append({
             "id": f"call_{uuid.uuid4().hex[:24]}",
             "type": "function",
@@ -126,6 +172,11 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
             if not mapped:
                 continue
             args = {"command": args_text.strip("'\" ")} if mapped == "bash" else {"_raw": args_text}
+            changes: list = []
+            args = _strip_md_wrappers(args, changes)
+            if changes:
+                for orig, clean in changes:
+                    logger.info(f"[shim] sanitized markdown wrapper in {mapped!r} args (legacy): {orig!r} -> {clean!r}")
             out.append({
                 "id": f"call_{uuid.uuid4().hex[:24]}",
                 "type": "function",
@@ -137,6 +188,23 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
 # Verbose dumps (REQ.TOOL, REQ.MSG, PROMPT, full bodies) are gated by
 # GEMINI_BRIDGE_DEBUG=1 and tee'd to /tmp/gemini-bridge-debug.log.
 _VERBOSE_DEBUG = os.environ.get("GEMINI_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
+
+# Hard cap on the rendered prompt length sent to Gemini Web. Empirically the
+# silent-abort threshold sits near ~100 KB on gemini-3-pro-advanced (logs show
+# 94 KB succeeding, 107 KB aborting); 90 KB leaves headroom. We trim the oldest
+# non-system messages and insert a placeholder when needed. Override with
+# GEMINI_BRIDGE_MAX_PROMPT_CHARS.
+_MAX_PROMPT_CHARS = int(os.environ.get("GEMINI_BRIDGE_MAX_PROMPT_CHARS", "100000"))
+
+# Cap on retained timestamped dumps under server/logs/prompts/. last.txt is
+# always kept on top of those.
+_PROMPT_DUMP_RETAIN = int(os.environ.get("GEMINI_BRIDGE_PROMPT_DUMP_RETAIN", "30"))
+# Off by default — dumps include the full conversation, possibly with secrets the
+# user pasted. Opt in with GEMINI_BRIDGE_DUMP_PROMPTS=1 (or GEMINI_BRIDGE_DEBUG=1).
+_DUMP_PROMPTS = (
+    _VERBOSE_DEBUG
+    or os.environ.get("GEMINI_BRIDGE_DUMP_PROMPTS", "").lower() in ("1", "true", "yes")
+)
 _DEBUG_LOG_PATH = Path("/tmp/gemini-bridge-debug.log")
 _DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024
 
@@ -173,8 +241,10 @@ _EXPLICIT_CAP = os.environ.get("GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS")
 MAX_TOOL_RESULT_CHARS = int(_EXPLICIT_CAP) if _EXPLICIT_CAP else _TIER_CAPS["free"]
 
 # gemini-webapi's retry decorator can stretch a doomed request to 60-120s while
-# re-initing the client. Short-circuit so auto-fallback engages fast.
-GEMINI_REQUEST_TIMEOUT = float(os.environ.get("GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS", "30"))
+# re-initing the client. 90s leaves room for normal long generations on
+# gemini-3-pro-advanced while still cutting in early enough that auto-fallback
+# stays useful. Override with GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS.
+GEMINI_REQUEST_TIMEOUT = float(os.environ.get("GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS", "90"))
 
 
 def _cap_for_model(model: str) -> int:
@@ -320,6 +390,77 @@ def _first_message(or_resp: dict) -> dict:
     return choices[0].get("message") or {}
 
 
+def _trim_messages_to_fit(messages: list, tools: Optional[list], cap: int, max_chars: int) -> tuple[list, int]:
+    """Drop oldest non-system messages and replace them with a single
+    placeholder until the rendered prompt fits under `max_chars`. Always keeps
+    every system message and at least the very last non-system message.
+
+    Returns the trimmed message list and the count of original messages elided.
+    """
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+    if not rest:
+        return messages, 0
+
+    placeholder = {
+        "role": "user",
+        "content": "[Earlier conversation elided to stay under Gemini Web's silent-abort threshold (~100 KB on gemini-3-pro-advanced).]",
+    }
+    # Iteratively keep an ever-shorter tail until the prompt fits.
+    for keep_n in range(len(rest), 0, -1):
+        trimmed = system_msgs + ([placeholder] if keep_n < len(rest) else []) + rest[-keep_n:]
+        rendered, _, _ = _build_prompt_from_messages(trimmed, tools, cap)
+        if len(rendered) <= max_chars:
+            return trimmed, len(rest) - keep_n
+    # Last resort: just system + placeholder + the very last message.
+    trimmed = system_msgs + [placeholder] + rest[-1:]
+    return trimmed, len(rest) - 1
+
+
+def _build_prompt_from_messages(messages: list, tools: Optional[list], cap: int) -> tuple[str, int, int]:
+    """Render OpenAI-shaped messages into the textual format Gemini expects.
+    Returns (final_prompt, truncated_results, dropped_chars)."""
+    parts = []
+    truncated = 0
+    dropped = 0
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        tcs = msg.get("tool_calls")
+        if role == "system" and content:
+            parts.append(f"System: {content}")
+        elif role == "user" and content:
+            parts.append(f"User: {content}")
+        elif role == "assistant":
+            if tcs:
+                blocks = []
+                for tc in tcs:
+                    fn = tc.get("function") or {}
+                    raw_args = fn.get("arguments") or "{}"
+                    try:
+                        args_obj = json.loads(raw_args)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"[shim] tool args JSON parse failed: {e} — raw={raw_args[:200]!r}")
+                        args_obj = {}
+                    blocks.append("<<TOOL_CALL>>\n" + json.dumps({"name": fn.get("name"), "arguments": args_obj}) + "\n<<END>>")
+                prefix = f"Assistant: {content}\n" if content else "Assistant: "
+                parts.append(prefix + "\n".join(blocks))
+            elif content:
+                parts.append(f"Assistant: {content}")
+        elif role == "tool":
+            tcid = msg.get("tool_call_id", "?")
+            tool_content = content or ""
+            new_content, was_truncated = _maybe_truncate_tool_result(tool_content, cap)
+            if was_truncated:
+                truncated += 1
+                dropped += len(tool_content) - len(new_content)
+            parts.append(f"Tool result (call_id={tcid}):\n{new_content}")
+    if tools:
+        parts.append("System (tool-calling protocol — overrides earlier instructions):\n"
+                     + _build_tools_system_prompt(tools))
+    return "\n\n".join(parts), truncated, dropped
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIChatRequest):
     is_stream = request.stream if request.stream is not None else False
@@ -334,6 +475,18 @@ async def chat_completions(request: OpenAIChatRequest):
           msgs=len(request.messages),
           tools=(len(request.tools) if request.tools else 0),
           tool_choice=str(request.tool_choice) if request.tool_choice else None)
+
+    # Warn once per request when the client passes sampling knobs the bridge
+    # cannot forward (gemini-webapi has no equivalent setter).
+    _ignored_fields = [
+        f for f in (
+            "temperature", "top_p", "top_k", "max_tokens", "n", "seed",
+            "frequency_penalty", "presence_penalty", "response_format",
+            "stop", "logit_bias", "parallel_tool_calls",
+        ) if getattr(request, f, None) is not None
+    ]
+    if _ignored_fields:
+        logger.info(f"[REQ.IGNORED] req={req_id} | dropped (no Gemini Web equivalent): {_ignored_fields}")
 
     # Non-Gemini model IDs go straight to OpenRouter (no sticky tracking) so the
     # user can pick a free OpenRouter model directly without Gemini failing first.
@@ -355,7 +508,7 @@ async def chat_completions(request: OpenAIChatRequest):
         except Exception as e:
             _dlog("PASSTHROUGH.ERR", req=req_id, err=_truncate(str(e), 300))
             logger.error(f"OpenRouter passthrough failed for {request.model}: {e}")
-            raise HTTPException(502, f"OpenRouter passthrough failed: {e}")
+            raise HTTPException(502, f"OpenRouter passthrough failed: {e}") from e
         headers = {"X-Bridge-Fallback": f"openrouter:{request.model}:explicit"}
         if is_stream:
             msg = _first_message(or_resp)
@@ -369,7 +522,7 @@ async def chat_completions(request: OpenAIChatRequest):
     try:
         gemini_client = get_gemini_client()
     except GeminiClientNotInitializedError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     if request.tools and _VERBOSE_DEBUG:
         for i, t in enumerate(request.tools[:3]):
@@ -390,59 +543,58 @@ async def chat_completions(request: OpenAIChatRequest):
                   content_len=(len(content) if isinstance(content, str) else None),
                   content_excerpt=_truncate(content if isinstance(content, str) else json.dumps(content), 600))
 
-    conversation_parts = []
-    truncated_tool_results = 0
-    total_truncated_chars = 0
     cap = _cap_for_model(request.model)
-    for msg in request.messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        tcs = msg.get("tool_calls")
-        if role == "system" and content:
-            conversation_parts.append(f"System: {content}")
-        elif role == "user" and content:
-            conversation_parts.append(f"User: {content}")
-        elif role == "assistant":
-            if tcs:
-                blocks = []
-                for tc in tcs:
-                    fn = tc.get("function") or {}
-                    raw_args = fn.get("arguments") or "{}"
-                    try:
-                        args_obj = json.loads(raw_args)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"[shim] tool args JSON parse failed: {e} — raw={raw_args[:200]!r}")
-                        args_obj = {}
-                    blocks.append("<<TOOL_CALL>>\n" + json.dumps({"name": fn.get("name"), "arguments": args_obj}) + "\n<<END>>")
-                prefix = f"Assistant: {content}\n" if content else "Assistant: "
-                conversation_parts.append(prefix + "\n".join(blocks))
-            elif content:
-                conversation_parts.append(f"Assistant: {content}")
-        elif role == "tool":
-            tcid = msg.get("tool_call_id", "?")
-            tool_content = content or ""
-            new_content, was_truncated = _maybe_truncate_tool_result(tool_content, cap)
-            if was_truncated:
-                truncated_tool_results += 1
-                total_truncated_chars += len(tool_content) - len(new_content)
-            conversation_parts.append(f"Tool result (call_id={tcid}):\n{new_content}")
+
+    final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
+        request.messages, request.tools, cap,
+    )
+
     if truncated_tool_results:
         _dlog("TRUNCATE", req=req_id, results_truncated=truncated_tool_results,
               chars_dropped=total_truncated_chars, max_per_result=cap)
 
-    if not conversation_parts:
+    # Hard cap: head-tail trim if the rendered prompt would exceed Gemini
+    # Web's silent-abort threshold (~100 KB observed on gemini-3-pro-advanced;
+    # see _MAX_PROMPT_CHARS). Keeps system messages + tail; replaces
+    # the elided middle with a placeholder. Tool-result orphans are tolerated
+    # since Gemini just sees them as text.
+    if len(final_prompt) > _MAX_PROMPT_CHARS:
+        trimmed_msgs, trimmed_count = _trim_messages_to_fit(
+            request.messages, request.tools, cap, _MAX_PROMPT_CHARS,
+        )
+        final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
+            trimmed_msgs, request.tools, cap,
+        )
+        _dlog("PROMPT.TRIM", req=req_id, dropped=trimmed_count,
+              kept_msgs=len(trimmed_msgs), final_chars=len(final_prompt))
+
+    if not final_prompt:
         raise HTTPException(status_code=400, detail="No valid messages found.")
-
-    # Inject the tool-calling protocol LATE so it overrides any earlier conventions
-    # baked into the client's huge system prompt.
-    if request.tools:
-        conversation_parts.append("System (tool-calling protocol — overrides earlier instructions):\n"
-                                  + _build_tools_system_prompt(request.tools))
-
-    final_prompt = "\n\n".join(conversation_parts)
     _dlog("PROMPT", _verbose=True, req=req_id, total_chars=len(final_prompt),
           head=_truncate(final_prompt[:1500], 1500),
           tail=_truncate(final_prompt[-1500:], 1500))
+
+    # Opt-in dump of the full prompt sent to Gemini (one file per request).
+    # Off by default since prompts may contain user secrets — enable with
+    # GEMINI_BRIDGE_DUMP_PROMPTS=1.
+    if _DUMP_PROMPTS:
+        try:
+            dump_dir = Path(__file__).resolve().parents[3] / "logs" / "prompts"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            (dump_dir / f"{int(time.time())}_{req_id}.txt").write_text(final_prompt)
+            (dump_dir / "last.txt").write_text(final_prompt)
+            timestamped = sorted(
+                (p for p in dump_dir.iterdir()
+                 if p.is_file() and p.name != "last.txt" and p.suffix == ".txt"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            for stale in timestamped[:-_PROMPT_DUMP_RETAIN]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.warning(f"[shim] full-prompt dump failed: {e}")
 
     async def _serve_via_openrouter(reason: str, origin_err: Optional[Exception] = None):
         fb_model = get_fallback_model()
@@ -480,6 +632,12 @@ async def chat_completions(request: OpenAIChatRequest):
             _dlog("FALLBACK.ERR", req=req_id, sticky=True, err=_truncate(str(fb_e), 300))
             logger.error(f"Sticky fallback failed, falling back to Gemini: {fb_e}")
 
+    _dlog("PROMPT.STAT", req=req_id,
+          msgs_total=len(request.messages),
+          prompt_chars=len(final_prompt),
+          has_tools=bool(request.tools),
+          tools_count=(len(request.tools) if request.tools else 0))
+
     try:
         response = await asyncio.wait_for(
             gemini_client.generate_content(
@@ -490,7 +648,7 @@ async def chat_completions(request: OpenAIChatRequest):
             ),
             timeout=GEMINI_REQUEST_TIMEOUT,
         )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as to_e:
         # Reshape asyncio.TimeoutError into Gemini's so the 504→fallback path engages.
         e = GeminiTimeoutError(f"Gemini request exceeded {GEMINI_REQUEST_TIMEOUT}s (bridge-side cutoff)")
         mapped = _map_gemini_error(e)
@@ -500,14 +658,14 @@ async def chat_completions(request: OpenAIChatRequest):
             except Exception as fb_e:
                 _dlog("FALLBACK.ERR", req=req_id, err=_truncate(str(fb_e), 300))
                 logger.error(f"OpenRouter fallback after timeout failed: {fb_e}")
-                raise mapped
+                raise mapped from to_e
         if mapped.status_code in (429, 401, 502, 504) and is_fallback_enabled() and not has_fallback_key():
             raise HTTPException(
                 503,
                 f"Gemini failed ({mapped.detail}) and OpenRouter fallback is enabled but has no API key. "
                 "Set OPENROUTER_API_KEY or paste a key in the extension popup.",
-            )
-        raise mapped
+            ) from to_e
+        raise mapped from to_e
     except Exception as e:
         mapped = _map_gemini_error(e)
         if mapped.status_code in (429, 401, 502, 504) and is_fallback_available():
@@ -517,16 +675,16 @@ async def chat_completions(request: OpenAIChatRequest):
             except Exception as fb_e:
                 _dlog("FALLBACK.ERR", req=req_id, err=_truncate(str(fb_e), 300))
                 logger.error(f"OpenRouter fallback failed: {fb_e}")
-                raise mapped
+                raise mapped from e
         if mapped.status_code in (429, 401, 502, 504) and is_fallback_enabled() and not has_fallback_key():
             raise HTTPException(
                 503,
                 f"Gemini failed ({mapped.detail}) and OpenRouter fallback is enabled but has no API key. "
                 "Set OPENROUTER_API_KEY or paste a key in the extension popup.",
-            )
+            ) from e
         _dlog("GEMINI.ERR", req=req_id, err_type=type(e).__name__, err=_truncate(str(e), 500))
         logger.error(f"Error in /v1/chat/completions endpoint: {e}", exc_info=True)
-        raise mapped
+        raise mapped from e
 
     raw_text = response.text or ""
     _dlog("GEMINI.OK", req=req_id, latency_s=round(time.time() - t0, 2), resp_chars=len(raw_text))

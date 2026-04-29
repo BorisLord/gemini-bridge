@@ -3,6 +3,9 @@ import sys
 import time
 import unittest
 
+# tests/conftest.py sets GEMINI_BRIDGE_DISABLE_PERSIST=1 before any test module
+# is imported, so fallback._persist() never writes the real config.conf when
+# setters are exercised below.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from app.services import fallback  # noqa: E402

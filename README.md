@@ -19,7 +19,7 @@ You're paying for **Gemini AI Pro / Ultra**, but agentic coding clients (OpenCod
 
 All paths require a Chromium-based browser signed into `gemini.google.com`.
 
-**Native** (Linux / macOS, WSL on Windows) — needs `git` + [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`). Python 3.10+ is fetched by `uv` automatically.
+**Native** (Linux / macOS, WSL on Windows) — needs `git` + [`uv`](https://docs.astral.sh/uv/getting-started/installation/). [`mise`](https://mise.jdx.dev/) users get `uv`/`ruff`/`pip-audit` pinned via `mise.toml` (`mise install` instead).
 
 ```bash
 git clone https://github.com/BorisLord/gemini-bridge && cd gemini-bridge
@@ -168,8 +168,36 @@ Each tool-result message is head+tail truncated before being sent to Gemini, siz
 
 Override globally with `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS=<n>`.
 
+## Prompt sizing & head-tail trimming
+
+Gemini Web silently aborts requests where the rendered prompt exceeds **~100 KB** on `gemini-3-pro-advanced` (the limit varies a bit per model and per session — empirically the bridge has logged 94 KB succeeding and 107 KB aborting on the same conversation). The abort surfaces as `APIError: silently aborted by Google`. The bridge therefore caps the rendered prompt at **100 KB** by default. When the cap would be exceeded:
+
+1. Every `role: "system"` message is preserved.
+2. The oldest non-system messages are dropped and replaced by a single placeholder: `[Earlier conversation elided to stay under Gemini Web's ~134 KB context window.]`.
+3. Iteration stops as soon as the rendered prompt fits.
+
+The full original history stays on the **client side** (OpenCode keeps it locally and resends it on the next turn) — only the wire prompt to Gemini is trimmed.
+
+Override with `GEMINI_BRIDGE_MAX_PROMPT_CHARS=NNNNN` if you have a different empirical threshold.
+
+## Known upstream limitations (`gemini-webapi`)
+
+The bridge depends on [`HanaokaYuzu/Gemini-API`](https://github.com/HanaokaYuzu/Gemini-API). Several upstream issues currently block more advanced features and explain why we run **fully stateless** today (no `cid/rid/rcid` reuse, no per-conversation server-side history):
+
+- **[#297](https://github.com/HanaokaYuzu/Gemini-API/issues/297)** — Google removed the `SNlM0e` access token from the Gemini page HTML in April 2026. `gemini-webapi 2.0.0` initialises with `access_token=None`, account reports `UNAUTHENTICATED`. Multi-turn server-side conversations are degraded; advanced models (`gemini-3-pro-advanced`) are unstable. `gemini-3-flash` text-only still works in *guest mode*.
+- **[PR #310](https://github.com/HanaokaYuzu/Gemini-API/pull/310)** — `Add Guest mode, periodic activity warmup, and browser client impersonation`. Closes #297 and #239. Includes a `get_access_token` cache-first fix relevant when the bridge forwards a full cookie jar (`__Secure-1PSIDCC` and friends). Currently **OPEN**. Worth installing if/when needed:
+  ```bash
+  uv pip install 'git+https://github.com/luuquangvu/Gemini-API.git@enable-guest-mode'
+  ```
+- **[PR #296 / commit `c10eac9`](https://github.com/HanaokaYuzu/Gemini-API/pull/296)** — fix shared-state bug in `ChatSession.__init__` (`DEFAULT_METADATA` aliased instead of copied). Merged on `main` but **not yet released** — any local code that creates a `ChatSession` instance with `gemini-webapi 2.0.0` will mutate the global metadata and corrupt subsequent stateless requests. The bridge therefore avoids `ChatSession` entirely.
+- **Chrome device-bound session cookies** — Google now binds Chrome cookies to the device. Cookies exfiltrated to a backend Python process are recognised as detached and trigger silent aborts on Pro models. The PR #310 author explicitly warns this is *"outside the scope of this PR and will be difficult to fix in the near future"*. Workaround documented upstream: capture cookies from **Firefox** (not device-bound) and use `impersonate="chrome"` + HTTP/3.
+
+### Future re-enable path
+A previous `X-Session-Affinity` / `X-Session-Id` header path (forwarding only the per-turn delta to a reused `ChatSession`) was implemented and then reverted. Rewire it once **all of**: PR #296 is released, PR #310 is merged, and a Firefox cookie capture is wired in the extension. Until then, full-history replay + the head-tail trim above is the only reliable mode.
+
 ## Known limitations
 
+- **Stateless replay**: each request resends the full history (head-tail trimmed under 120 KB). See *Known upstream limitations* for why server-side `cid/rid/rcid` reuse is on hold.
 - **Synthetic SSE**: `gemini-webapi` returns the full response in one shot; bridge chunks it into SSE frames after. No typewriter effect, but protocol-compliant.
 - **No usage tracking**: `usage` block is always zero (Gemini Web doesn't expose remaining quota).
 - **Tool calling via shim**: Gemini Web has no native function calling, so the bridge prompts the model to emit a structured block and parses it into OpenAI `tool_calls[]`. Works with OpenCode (Read/Edit/Bash/WebFetch). OpenRouter calls use native tool calling.
@@ -185,7 +213,7 @@ Override globally with `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS=<n>`.
 | `systemd/` | User-service unit. |
 | `start.sh` | Setup-on-first-run launcher. |
 
-Tests: `cd server && python -m unittest discover tests -v` (with the venv created by `./start.sh` activated, or deps installed). Covers the chat handler, tool-call shim, Gem URL parsing, OpenRouter state machine, admin origin checks, `/v1/models` discovery.
+Tests: `mise run test` (or `cd server && python -m unittest discover tests -v` with the venv activated). Covers the chat handler, tool-call shim, Gem URL parsing, OpenRouter state machine, admin origin checks, `/v1/models` discovery. Lint: `mise run lint`. Audit deps: `mise run audit`.
 
 ## License
 

@@ -14,17 +14,20 @@ from app.endpoints import chat, auth
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Always reinitialize in worker: the parent's httpx client is bound to a dead
-    # event loop after multiprocessing fork.
-    import app.services.gemini_client as gc_mod
-    gc_mod._gemini_client = None
     try:
         if await init_gemini_client():
-            logger.info("Gemini client successfully initialized in worker process.")
+            logger.info("Gemini client initialized in worker process.")
         else:
             logger.warning("Gemini client not initialized — waiting for cookies via /auth/cookies.")
     except Exception as e:
         logger.error(f"Error initializing Gemini client in worker process: {e}")
+
+    from app.endpoints.chat import _DUMP_PROMPTS
+    logger.info(
+        "[BOOT] features active: markdown-arg sanitizer, head-tail prompt trim (cap GEMINI_BRIDGE_MAX_PROMPT_CHARS), "
+        "OpenRouter fallback persisted to config.conf, "
+        f"full-prompt dumps {'on (server/logs/prompts/)' if _DUMP_PROMPTS else 'off (set GEMINI_BRIDGE_DUMP_PROMPTS=1)'}"
+    )
 
     yield
 

@@ -1,13 +1,19 @@
 """Auto-fallback to OpenRouter (free models) when Gemini quotas are exhausted."""
 
+import configparser
 import json
+import logging
 import os
 import time
+from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from app.config import CONFIG
+
+logger = logging.getLogger("app")
+_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config.conf"
 
 # Free OpenRouter models with tool/function-calling support (verified against
 # /api/v1/models on 2026-04-27 — all `:free` and declare `tools`). OpenRouter
@@ -59,6 +65,10 @@ _state: dict = {
     "api_key": _initial_api_key(),
     "model": _initial_model(),
 }
+logger.info(
+    f"[fallback] init from config.conf — enabled={_state['enabled']}, "
+    f"has_api_key={bool(_state['api_key'])}, model={_state['model']!r}"
+)
 
 # After one successful auto-fallback, skip Gemini for this many hours (0 disables).
 STICKY_HOURS = float(os.environ.get("GEMINI_BRIDGE_FALLBACK_STICKY_HOURS", "1"))
@@ -83,18 +93,52 @@ def get_model() -> str:
     return _state["model"]
 
 
+def _persist() -> None:
+    """Mirror runtime state into [OpenRouter] section of config.conf so the
+    extension popup choices survive systemd restarts. Atomic write."""
+    # Tests import the module and call setters via fixtures — never let those
+    # touch the real config.conf. Set this in any test runner.
+    if os.environ.get("GEMINI_BRIDGE_DISABLE_PERSIST", "").lower() in ("1", "true", "yes"):
+        return
+    if not _CONFIG_PATH.exists():
+        logger.warning(f"Cannot persist OpenRouter config: {_CONFIG_PATH} not found.")
+        return
+    try:
+        cfg = configparser.ConfigParser()
+        cfg.read(_CONFIG_PATH, encoding="utf-8")
+        if "OpenRouter" not in cfg:
+            cfg["OpenRouter"] = {}
+        cfg["OpenRouter"]["enabled"] = "true" if _state["enabled"] else "false"
+        cfg["OpenRouter"]["api_key"] = _state["api_key"] or ""
+        cfg["OpenRouter"]["model"] = _state["model"] or ""
+        tmp = _CONFIG_PATH.with_suffix(_CONFIG_PATH.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            cfg.write(f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, _CONFIG_PATH)
+        logger.info(
+            f"[fallback] persisted to config.conf — enabled={_state['enabled']}, "
+            f"has_api_key={bool(_state['api_key'])}, model={_state['model']!r}"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to persist OpenRouter config: {e}")
+
+
 def set_enabled(enabled: bool) -> None:
     _state["enabled"] = bool(enabled)
+    _persist()
 
 
 def set_api_key(api_key: Optional[str]) -> None:
     _state["api_key"] = (api_key or "").strip() or None
+    _persist()
 
 
 def set_model(model: str) -> None:
     if not model:
         raise ValueError("model cannot be empty")
     _state["model"] = model
+    _persist()
 
 
 def get_public_state() -> dict:
