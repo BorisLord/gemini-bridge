@@ -1,0 +1,36 @@
+# Tool versions for gemini-bridge.
+# Install everything with: mise install
+# Then ./start.sh (or run tasks below) — mise auto-activates these tools when
+# you cd into the project (requires `mise activate` in your shell rc).
+
+[tools]
+python = "3.13"
+uv = "latest"
+ruff = "latest"
+"pipx:pip-audit" = "latest"
+
+[env]
+# Keep server/.venv on PATH so `python` / `pytest` / etc. resolve to the
+# project's deps without a manual `source .venv/bin/activate`.
+_.python.venv = { path = "server/.venv", create = false }
+
+[tasks.setup]
+description = "First-run install: create server/.venv and install deps"
+run = "./start.sh --setup-only"
+
+[tasks.serve]
+description = "Run the bridge on :6969"
+run = "./start.sh"
+
+[tasks.test]
+description = "Run the server unit tests"
+dir = "server"
+run = "python -m unittest discover tests -v"
+
+[tasks.lint]
+description = "Lint server code (pyflakes + bugbear)"
+run = "ruff check --select F,B server/src server/tests"
+
+[tasks.audit]
+description = "Scan runtime deps for known vulnerabilities"
+run = "pip-audit -r server/requirements.txt --strict"

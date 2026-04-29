@@ -11,6 +11,7 @@ server/uv.lock
 server/src/config.conf
 __pycache__/
 .venv/
+.ruff_cache/
 
 # Misc
 *.har
@@ -23,3 +24,5 @@ server/logs/
 .vscode/
 .idea/
 .python-version
+
+.memsearch
