@@ -7,8 +7,6 @@ Local FastAPI + Chrome extension that exposes your **Google Gemini subscription*
 
 ```
 Chrome ──cookies──▶ localhost:6969 ──/v1/chat/completions──▶ OpenCode / curl / …
-                                          │
-                                          └─(opt-in fallback on quota/error)─▶ OpenRouter (free)
 ```
 
 ## Why
@@ -89,16 +87,6 @@ Click the icon → **Detect accounts** — the server probes `/u/0…7` and retu
 
 Open your Gem on `gemini.google.com`, copy the URL (e.g. `https://gemini.google.com/u/0/gem/eb0eb9162487`), paste it (or just the ID) in the popup → **Apply**. Empty + Apply clears. Persists in memory; set `GEMINI_BRIDGE_GEM_ID` to pre-select at boot.
 
-## OpenRouter fallback
-
-When enabled, the bridge transparently retries Gemini failures (429 / 401 / 502 / 504) on OpenRouter free models in the same HTTP round-trip — clients see a 200 instead of an error. Toggleable from the popup, no restart.
-
-**Off by default** — flip the popup toggle, set `GEMINI_BRIDGE_FALLBACK_ENABLED=true`, or `[OpenRouter] enabled=true` in `config.conf`. Get a free key at [openrouter.ai/keys](https://openrouter.ai/keys), then set `OPENROUTER_API_KEY=…`, `[OpenRouter] api_key=…`, or paste it in the popup. Default model: `qwen/qwen3-coder:free`. Other curated free picks: `z-ai/glm-4.5-air:free`, `openai/gpt-oss-120b:free`, `meta-llama/llama-3.3-70b-instruct:free`, `nvidia/nemotron-3-super-120b-a12b:free` — all support tool calls.
-
-After one successful fallback, the next ~1h of requests bypass Gemini directly (`reason=sticky`). Reset via the popup *Retry Gemini now* button or `POST /admin/reset-fallback`. Override the window with `GEMINI_BRIDGE_FALLBACK_STICKY_HOURS=<n>` (`0` disables). Pass a non-Gemini model ID (e.g. `qwen/qwen3-coder:free`) to route straight to OpenRouter without ever calling Gemini (passthrough).
-
-Visibility: response header `X-Bridge-Fallback: openrouter:<model>:<reason>`, response `model` field becomes `gemini-3-pro→openrouter:qwen/qwen3-coder:free`. Free-tier daily caps apply (~50 req/day per model); deposit $10 on OpenRouter to raise to ~1000.
-
 ## Headless / no-extension flow
 
 Drop a `.env` at the repo root (`cp .env.example .env`) — `start.sh` and `docker compose` both auto-source it:
@@ -107,11 +95,10 @@ Drop a `.env` at the repo root (`cp .env.example .env`) — `start.sh` and `dock
 GEMINI_COOKIE_1PSID=g.a000…
 GEMINI_COOKIE_1PSIDTS=sidts-…
 GEMINI_BRIDGE_ACCOUNT_INDEX=0
-OPENROUTER_API_KEY=sk-or-v1-…   # optional
 GEMINI_BRIDGE_GEM_ID=           # optional
 ```
 
-Re-paste `__Secure-1PSID` only when you log out (rotation of `_1PSIDTS` is automatic, see Install). Alternatives: write the same keys under `[Cookies]` / `[OpenRouter]` in `server/config.conf`, or export pure env vars (12-factor / k8s).
+Re-paste `__Secure-1PSID` only when you log out (rotation of `_1PSIDTS` is automatic, see Install). Alternatives: write the same keys under `[Cookies]` in `server/config.conf`, or export pure env vars (12-factor / k8s).
 
 Smoke test:
 
@@ -134,11 +121,6 @@ Precedence everywhere: **env > `config.conf` > extension/popup runtime**.
 | `GEMINI_COOKIE_1PSID` / `_1PSIDTS` | from config / browser | Headless cookie auth. |
 | `GEMINI_BRIDGE_ACCOUNT_INDEX` | `0` | Multi-account `/u/N` selection. |
 | `GEMINI_BRIDGE_GEM_ID` | unset | Pre-select a Gem at boot. |
-| `OPENROUTER_API_KEY` | unset | Bearer for fallback. |
-| `GEMINI_BRIDGE_FALLBACK_ENABLED` | `false` | Initial toggle. |
-| `GEMINI_BRIDGE_FALLBACK_MODEL` | `qwen/qwen3-coder:free` | Initial OpenRouter model. |
-| `GEMINI_BRIDGE_FALLBACK_STICKY_HOURS` | `1` | Sticky window after success. `0` disables. |
-| `GEMINI_BRIDGE_OPENROUTER_TIMEOUT_SECONDS` | `60` | Hard cutoff per OpenRouter call. |
 
 ## HTTP API
 
@@ -150,8 +132,6 @@ Precedence everywhere: **env > `config.conf` > extension/popup runtime**.
 | `POST` | `/auth/cookies/{provider}` | extension | Push fresh Google cookies. |
 | `POST` | `/auth/accounts/{provider}` | extension | Probe `/u/0…7` for signed-in emails. |
 | `GET` | `/admin/status` | extension | Bridge state. |
-| `POST` | `/admin/reset-fallback` | extension | Clear sticky window. |
-| `POST` | `/admin/openrouter` | extension | Update fallback config. |
 | `POST` | `/admin/gem` | extension | Set active Gem (URL or ID). |
 
 "Extension" = `Origin: chrome-extension://…` OR `X-Extension-Id` header. The bridge binds loopback only — it's CSRF hygiene, not authn.
@@ -200,7 +180,7 @@ A previous `X-Session-Affinity` / `X-Session-Id` header path (forwarding only th
 - **Stateless replay**: each request resends the full history (head-tail trimmed under 120 KB). See *Known upstream limitations* for why server-side `cid/rid/rcid` reuse is on hold.
 - **Synthetic SSE**: `gemini-webapi` returns the full response in one shot; bridge chunks it into SSE frames after. No typewriter effect, but protocol-compliant.
 - **No usage tracking**: `usage` block is always zero (Gemini Web doesn't expose remaining quota).
-- **Tool calling via shim**: Gemini Web has no native function calling, so the bridge prompts the model to emit a structured block and parses it into OpenAI `tool_calls[]`. Works with OpenCode (Read/Edit/Bash/WebFetch). OpenRouter calls use native tool calling.
+- **Tool calling via shim**: Gemini Web has no native function calling, so the bridge prompts the model to emit a structured block and parses it into OpenAI `tool_calls[]`. Works with OpenCode (Read/Edit/Bash/WebFetch).
 - One Chrome profile = one bridge. Multiple profiles → multiple ports.
 
 ## Repository layout
@@ -208,12 +188,12 @@ A previous `X-Session-Affinity` / `X-Session-Id` header path (forwarding only th
 | Path | What it is |
 |---|---|
 | `extension/` | Chrome MV3 (cookie sync + popup controls). |
-| `server/` | FastAPI server (Gemini wrapper + OpenRouter fallback). |
+| `server/` | FastAPI server (Gemini wrapper). |
 | `examples/opencode.jsonc` | Drop-in OpenCode config. |
 | `systemd/` | User-service unit. |
 | `start.sh` | Setup-on-first-run launcher. |
 
-Tests: `mise run test` (or `cd server && python -m unittest discover tests -v` with the venv activated). Covers the chat handler, tool-call shim, Gem URL parsing, OpenRouter state machine, admin origin checks, `/v1/models` discovery. Lint: `mise run lint`. Audit deps: `mise run audit`.
+Tests: `mise run test` (or `cd server && python -m unittest discover tests -v` with the venv activated). Covers the chat handler, tool-call shim, Gem URL parsing, admin origin checks, `/v1/models` discovery. Lint: `mise run lint`. Audit deps: `mise run audit`.
 
 ## License
 
