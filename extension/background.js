@@ -172,34 +172,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const provider = PROVIDERS.find((p) => p.id === msg.providerId);
       if (provider) await pushProvider(provider, "account-selected");
       sendResponse({ done: true });
-    } else if (msg?.type === "reset-fallback") {
-      try {
-        const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/reset-fallback`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-        });
-        sendResponse({ ok: res.ok, status: res.status });
-      } catch (e) {
-        sendResponse({ ok: false, error: e.message });
-      }
     } else if (msg?.type === "select-gem") {
       try {
         const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/gem`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gem_id: msg.gem_id || null }),
-        });
-        const body = await res.json().catch(() => ({}));
-        sendResponse({ ok: res.ok, status: res.status, body });
-      } catch (e) {
-        sendResponse({ ok: false, error: e.message });
-      }
-    } else if (msg?.type === "openrouter-update") {
-      try {
-        const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/openrouter`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(msg.patch || {}),
         });
         const body = await res.json().catch(() => ({}));
         sendResponse({ ok: res.ok, status: res.status, body });
