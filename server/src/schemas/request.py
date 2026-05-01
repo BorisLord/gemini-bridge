@@ -1,5 +1,19 @@
-from typing import Any, List, Optional, Union
-from pydantic import BaseModel
+from typing import Any, List, Literal, Optional, Union
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ChatMessage(BaseModel):
+    """One entry in the OpenAI `messages[]` array. Strict on `role`,
+    permissive on extras so vendor SDKs that smuggle extra keys don't 422."""
+
+    model_config = ConfigDict(extra="allow")
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: Optional[Union[str, List[dict]]] = None
+    name: Optional[str] = None
+    tool_calls: Optional[List[dict]] = None
+    tool_call_id: Optional[str] = None
 
 
 class OpenAIChatRequest(BaseModel):
@@ -10,7 +24,7 @@ class OpenAIChatRequest(BaseModel):
     in the warn log emitted at request time, instead of letting clients
     silently believe they took effect."""
 
-    messages: List[dict]
+    messages: List[ChatMessage]
     model: Optional[str] = None
     stream: Optional[bool] = False
     tools: Optional[List[dict]] = None
