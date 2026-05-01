@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 import sys
 from typing import Tuple
 
@@ -44,12 +45,14 @@ def get_app_info() -> Tuple[str, str]:
 def print_server_info(host: str, port: int):
     base_url = f"http://{host}:{port}"
     app_name, app_version = get_app_info()
+    docs_enabled = os.environ.get("GEMINI_BRIDGE_ENABLE_DOCS", "").lower() in ("1", "true", "yes")
     print("\n" + "=" * 80)
     print(f"{Colors.BOLD}{Colors.YELLOW}{f'{app_name} v{app_version}'.center(80)}{Colors.RESET}")
     print(f"{app_name} — OpenAI-compatible API on top of gemini.google.com".center(80))
     print("=" * 80)
     print("\nServices:")
-    print(f"  - Docs:   {base_url}/docs")
+    if docs_enabled:
+        print(f"  - Docs:   {base_url}/docs")
     print(f"  - Status: {base_url}/admin/status")
     print(f"\nConfig: browser={CONFIG['Browser']['name']} model={CONFIG['Gemini']['default_model']}")
     print("\nEndpoints:")
