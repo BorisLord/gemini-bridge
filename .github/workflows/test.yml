@@ -15,12 +15,13 @@ jobs:
       - uses: jdx/mise-action@v3
         with:
           experimental: true
-      - name: Install server deps
+      - name: Create venv + install deps
         working-directory: server
-        run: uv pip install --system -r requirements.txt
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python -r requirements.txt
       - name: Lint
         run: mise run lint
       - name: Run unit tests
-        working-directory: server
         timeout-minutes: 5
-        run: python -m unittest discover tests -v
+        run: mise run test
