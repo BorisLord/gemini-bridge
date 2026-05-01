@@ -9,7 +9,6 @@ from app.services.gemini_client import (
     get_selected_gem_id,
     set_selected_gem_id,
 )
-from app.services import fallback as openrouter
 from app.logger import logger
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -23,46 +22,8 @@ async def get_status(
 ):
     _check_extension(origin, x_extension_id)
     return {
-        "openrouter": openrouter.get_public_state(),
-        "last_fallback": openrouter.get_last_fallback_event(),
         "gem": {"selected_id": get_selected_gem_id()},
     }
-
-
-@status_router.post("/reset-fallback")
-async def reset_fallback(
-    origin: Optional[str] = Header(default=None),
-    x_extension_id: Optional[str] = Header(default=None),
-):
-    _check_extension(origin, x_extension_id)
-    openrouter.reset_sticky()
-    return {"status": "ok", "sticky_until": None}
-
-
-class OpenRouterUpdate(BaseModel):
-    enabled: Optional[bool] = None
-    api_key: Optional[str] = None
-    model: Optional[str] = None
-
-
-@status_router.post("/openrouter")
-async def update_openrouter(
-    payload: OpenRouterUpdate,
-    origin: Optional[str] = Header(default=None),
-    x_extension_id: Optional[str] = Header(default=None),
-):
-    _check_extension(origin, x_extension_id)
-    if payload.enabled is not None:
-        openrouter.set_enabled(payload.enabled)
-    if payload.api_key is not None:
-        openrouter.set_api_key(payload.api_key or None)
-    if payload.model is not None and payload.model.strip():
-        openrouter.set_model(payload.model.strip())
-    logger.info(
-        f"OpenRouter config updated by {origin or x_extension_id}: "
-        f"enabled={openrouter.is_enabled()}, has_key={openrouter.has_api_key()}, model={openrouter.get_model()}"
-    )
-    return openrouter.get_public_state()
 
 
 class GemSelection(BaseModel):
@@ -78,7 +39,9 @@ async def select_gem(
 ):
     _check_extension(origin, x_extension_id)
     set_selected_gem_id(payload.gem_id)
-    logger.info(f"Gem selection updated by {origin or x_extension_id}: {get_selected_gem_id()!r}")
+    # Don't interpolate `origin`/`x_extension_id` — both are spoofable by any
+    # local process and would let a caller plant arbitrary strings into logs.
+    logger.info(f"Gem selection updated: {get_selected_gem_id()!r}")
     return {"selected_id": get_selected_gem_id()}
 
 
@@ -162,7 +125,7 @@ async def update_cookies(
         if result == "failed":
             raise HTTPException(502, "Failed to authenticate with provided cookies")
         if result == "refreshed":
-            logger.info(f"Provider 'gemini' refreshed (u/{payload.account_index}) by {origin or x_extension_id}")
+            logger.info(f"Provider 'gemini' refreshed (u/{payload.account_index})")
         return {
             "status": "ok",
             "provider": provider,

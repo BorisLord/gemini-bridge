@@ -1,7 +1,7 @@
 [project]
 name = "gemini-bridge"
 version = "0.1.0"
-description = "OpenAI-compatible API on top of gemini.google.com, with OpenRouter free-tier fallback."
+description = "OpenAI-compatible API on top of gemini.google.com."
 authors = [
     { name = "Boris Lord", email = "106592312+BorisLord@users.noreply.github.com" },
 ]

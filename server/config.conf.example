@@ -21,11 +21,3 @@ gemini_cookie_1psidts =
 # Example: http_proxy = http://127.0.0.1:8080
 [Proxy]
 http_proxy =
-
-# --- OpenRouter Fallback ---
-# Used when Gemini hits a quota / auth / timeout error.
-# api_key precedence: OPENROUTER_API_KEY env > this file. Popup can flip enabled/model at runtime.
-[OpenRouter]
-enabled = false
-api_key =
-model = qwen/qwen3-coder:free

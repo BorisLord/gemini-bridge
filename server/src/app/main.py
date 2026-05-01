@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -10,6 +11,11 @@ from app.services.gemini_client import init_gemini_client
 from app.logger import logger
 
 from app.endpoints import chat, auth
+
+# /docs, /redoc and /openapi.json are off by default to keep the internal API
+# surface (admin endpoints included) hidden. Opt-in for local development with
+# GEMINI_BRIDGE_ENABLE_DOCS=1.
+_DOCS_ENABLED = os.environ.get("GEMINI_BRIDGE_ENABLE_DOCS", "").lower() in ("1", "true", "yes")
 
 
 @asynccontextmanager
@@ -25,7 +31,6 @@ async def lifespan(app: FastAPI):
     from app.endpoints.chat import _DUMP_PROMPTS
     logger.info(
         "[BOOT] features active: markdown-arg sanitizer, head-tail prompt trim (cap GEMINI_BRIDGE_MAX_PROMPT_CHARS), "
-        "OpenRouter fallback persisted to config.conf, "
         f"full-prompt dumps {'on (server/logs/prompts/)' if _DUMP_PROMPTS else 'off (set GEMINI_BRIDGE_DUMP_PROMPTS=1)'}"
     )
 
@@ -34,7 +39,12 @@ async def lifespan(app: FastAPI):
     logger.info("Application shutdown complete.")
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+)
 
 app.add_middleware(
     CORSMiddleware,

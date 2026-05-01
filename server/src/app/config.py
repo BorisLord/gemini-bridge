@@ -24,8 +24,6 @@ def load_config(config_file: str = "config.conf") -> configparser.ConfigParser:
         config["Gemini"] = {"default_model": "gemini-3-flash", "gem_id": ""}
     if "Proxy" not in config:
         config["Proxy"] = {"http_proxy": ""}
-    if "OpenRouter" not in config:
-        config["OpenRouter"] = {"enabled": "false", "api_key": "", "model": ""}
 
     try:
         with open(config_file, "w", encoding="utf-8") as f:
