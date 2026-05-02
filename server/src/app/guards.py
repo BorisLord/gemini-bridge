@@ -5,9 +5,7 @@ from litestar.handlers.base import BaseRouteHandler
 
 
 def extension_only(connection: ASGIConnection, _handler: BaseRouteHandler) -> None:
-    """Accept iff Origin is a {chrome,moz}-extension:// URL OR X-Extension-Id is set.
-    The latter covers GETs where Chrome strips Origin (host_permissions, same-origin-like).
-    CSRF/inter-extension hygiene — not real authn (both signals are spoofable)."""
+    """Accept browser-extension Origin or X-Extension-Id (Chrome strips Origin on host_permissions GETs)."""
     origin = connection.headers.get("origin")
     if origin and origin.startswith(("chrome-extension://", "moz-extension://")):
         return
