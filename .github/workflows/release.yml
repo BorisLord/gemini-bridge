@@ -35,8 +35,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
       - uses: docker/build-push-action@v7
         with:
           context: .

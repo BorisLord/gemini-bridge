@@ -1,17 +1,23 @@
 # Gemini Bridge
 
+> **Use your Google Gemini Free/Pro/Ultra subscription in OpenCode, Cline, Aider and more like an OpenAI key, except free.**
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/BorisLord/gemini-bridge?include_prereleases&sort=semver)](https://github.com/BorisLord/gemini-bridge/releases)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Litestar 2.21](https://img.shields.io/badge/litestar-2.21-FFC107.svg)](https://litestar.dev/)
+[![Tests](https://img.shields.io/badge/tests-85_passing-success.svg)](server/tests/)
+[![GitHub stars](https://img.shields.io/github/stars/BorisLord/gemini-bridge?style=social)](https://github.com/BorisLord/gemini-bridge/stargazers)
 
-Local Litestar server + Chrome extension that exposes your **Google Gemini subscription** as an **OpenAI-compatible API** on `http://localhost:6969/v1`. Any client speaking `/v1/chat/completions` (OpenCode, Cline, Continue, Aider, Codex, `curl`…) drives Gemini 3 Pro / Flash / Thinking through your browser quota — no API key, multi-account ready (`/u/0`, `/u/1`, …).
+Local OpenAI-compatible proxy + Chrome MV3 extension. Any client speaking `/v1/chat/completions` (OpenCode, Cline, Aider, AnythingLLM, Open WebUI, `curl`…) drives **Gemini 3 Pro / Flash / Thinking** through your browser quota — no API key, multi-account ready (`/u/0`, `/u/1`, …), Gems, tool-calls, streaming.
 
 ```
-Chrome ──cookies──▶ localhost:6969 ──/v1/chat/completions──▶ OpenCode / curl / …
+Chrome ──cookies──▶ localhost:6969 ──/v1/chat/completions──▶ OpenCode / Cline / Aider / curl
 ```
 
 ## Why
 
-You're paying for **Gemini AI Pro / Ultra**, but agentic coding clients (OpenCode, Cline, Aider, Continue) only speak OpenAI — so the subscription quota you already pay for stays unused. This bridge maps your browser session to `/v1/chat/completions`: same Gemini models, same quota, no extra API bill.
+You're paying for **Gemini AI Pro / Ultra**, but agentic coding clients (OpenCode, Cline, Aider) only speak OpenAI — so the subscription quota you already pay for stays unused. This bridge maps your browser session to `/v1/chat/completions`: same Gemini models, same quota, no extra API bill.
 
 ## Install
 
@@ -195,6 +201,10 @@ A previous `X-Session-Affinity` / `X-Session-Id` header path (forwarding only th
 | `start.sh` | Setup-on-first-run launcher. |
 
 Tests: `mise run test` (or `cd server && python -m unittest discover tests -v` with the venv activated). Covers the chat handler, tool-call shim, Gem URL parsing, admin origin checks, `/v1/models` discovery. Lint: `mise run lint`. Audit deps: `mise run audit`.
+
+## Support
+
+If this saves you an API bill, [**leave a star**](https://github.com/BorisLord/gemini-bridge/stargazers) — it's how others find it. Issues and PRs welcome.
 
 ## License
 
