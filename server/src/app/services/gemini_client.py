@@ -4,10 +4,11 @@
 # worker its own copy and break refresh-via-/auth/cookies (the worker that
 # served /auth/cookies is not necessarily the one that handles the next
 # /v1/chat/completions). `start.sh` always launches a single worker.
-import os
+import contextlib
 import re
 
 from models.gemini import MyGeminiClient
+from app import settings
 from app.config import CONFIG
 from app.logger import logger
 from app.utils.browser import get_cookie_from_browser
@@ -16,7 +17,6 @@ from gemini_webapi.exceptions import AuthError
 
 
 class GeminiClientNotInitializedError(Exception):
-    """Raised when the Gemini client is not initialized or initialization failed."""
     pass
 
 
@@ -56,8 +56,8 @@ def set_selected_gem_id(gem_id_or_url: str | None) -> None:
 
 def _resolve_cookies() -> tuple[str | None, str | None]:
     """Precedence: env > config.conf > browser_cookie3 fallback."""
-    psid = os.environ.get("GEMINI_COOKIE_1PSID") or CONFIG["Cookies"].get("gemini_cookie_1PSID")
-    psidts = os.environ.get("GEMINI_COOKIE_1PSIDTS") or CONFIG["Cookies"].get("gemini_cookie_1PSIDTS")
+    psid = settings.cookie_1psid_env() or CONFIG["Cookies"].get("gemini_cookie_1PSID")
+    psidts = settings.cookie_1psidts_env() or CONFIG["Cookies"].get("gemini_cookie_1PSIDTS")
     if not psid or not psidts:
         from_browser = get_cookie_from_browser("gemini")
         if from_browser:
@@ -67,7 +67,10 @@ def _resolve_cookies() -> tuple[str | None, str | None]:
 
 def _resolve_account_index() -> int:
     """Precedence: env > config.conf > 0."""
-    raw = os.environ.get("GEMINI_BRIDGE_ACCOUNT_INDEX") or CONFIG["Cookies"].get("gemini_account_index") or "0"
+    env_idx = settings.account_index_env()
+    if env_idx is not None:
+        return env_idx
+    raw = CONFIG["Cookies"].get("gemini_account_index") or "0"
     try:
         return int(raw)
     except ValueError:
@@ -76,11 +79,10 @@ def _resolve_account_index() -> int:
 
 def _resolve_initial_gem_id() -> str | None:
     """Precedence: env > config.conf > None."""
-    if v := os.environ.get("GEMINI_BRIDGE_GEM_ID"):
-        return v.strip() or None
-    if "Gemini" in CONFIG:
-        if v := CONFIG["Gemini"].get("gem_id", "").strip():
-            return v
+    if v := settings.initial_gem_id_env():
+        return v
+    if "Gemini" in CONFIG and (v := CONFIG["Gemini"].get("gem_id", "").strip()):
+        return v
     return None
 
 
@@ -167,10 +169,8 @@ async def refresh_gemini_client(
     CONFIG["Cookies"]["gemini_cookie_1psidts"] = psidts
     CONFIG["Cookies"]["gemini_account_index"] = str(account_index)
     if old_client is not None:
-        try:
+        with contextlib.suppress(Exception):
             await old_client.close()
-        except Exception:
-            pass
     logger.info(f"Gemini client refreshed (account_index={account_index}).")
     return "refreshed"
 

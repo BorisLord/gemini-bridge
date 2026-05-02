@@ -28,8 +28,8 @@ dir = "server"
 run = "python -m unittest discover tests -v"
 
 [tasks.lint]
-description = "Lint server code (pyflakes + bugbear)"
-run = "ruff check --select F,B server/src server/tests"
+description = "Lint server code (pyflakes + bugbear + pyupgrade + ruff-specific + simplify)"
+run = "ruff check --select F,B,UP,RUF,SIM,PIE,RET server/src server/tests"
 
 [tasks.audit]
 description = "Scan runtime deps for known vulnerabilities"

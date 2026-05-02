@@ -1,7 +1,6 @@
 import configparser
 import logging
 import os
-from typing import Optional, List, Union
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 from gemini_webapi import GeminiClient as WebGeminiClient
@@ -34,7 +33,7 @@ class MyGeminiClient:
         secure_1psidts: str,
         proxy: str | None = None,
         account_index: int = 0,
-        extra_cookies: Optional[dict] = None,
+        extra_cookies: dict | None = None,
     ) -> None:
         self.client = WebGeminiClient(secure_1psid, secure_1psidts, proxy)
         self.account_index = account_index
@@ -100,8 +99,8 @@ class MyGeminiClient:
         self,
         message: str,
         model: str,
-        files: Optional[List[Union[str, Path]]] = None,
-        gem: Optional[str] = None,
+        files: list[str | Path] | None = None,
+        gem: str | None = None,
     ):
         return await self.client.generate_content(message, model=model, files=files, gem=gem)
 

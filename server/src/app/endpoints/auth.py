@@ -2,8 +2,8 @@ import re
 import httpx
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, List
 
+from app import settings
 from app.services.gemini_client import (
     refresh_gemini_client,
     get_selected_gem_id,
@@ -17,8 +17,8 @@ status_router = APIRouter(prefix="/admin", tags=["admin"])
 
 @status_router.get("/status")
 async def get_status(
-    origin: Optional[str] = Header(default=None),
-    x_extension_id: Optional[str] = Header(default=None),
+    origin: str | None = Header(default=None),
+    x_extension_id: str | None = Header(default=None),
 ):
     _check_extension(origin, x_extension_id)
     return {
@@ -28,14 +28,14 @@ async def get_status(
 
 class GemSelection(BaseModel):
     # Raw Gem ID or full URL https://gemini.google.com/u/N/gem/<id>; None/"" clears.
-    gem_id: Optional[str] = None
+    gem_id: str | None = None
 
 
 @status_router.post("/gem")
 async def select_gem(
     payload: GemSelection,
-    origin: Optional[str] = Header(default=None),
-    x_extension_id: Optional[str] = Header(default=None),
+    origin: str | None = Header(default=None),
+    x_extension_id: str | None = Header(default=None),
 ):
     _check_extension(origin, x_extension_id)
     set_selected_gem_id(payload.gem_id)
@@ -45,14 +45,8 @@ async def select_gem(
     return {"selected_id": get_selected_gem_id()}
 
 
-UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-)
-
-
 class CookiesPayload(BaseModel):
-    cookies: Dict[str, str]
+    cookies: dict[str, str]
     account_index: int = Field(default=0, ge=0, le=20)
 
 
@@ -62,8 +56,8 @@ class AccountInfo(BaseModel):
 
 
 def _check_extension(
-    origin: Optional[str] = None,
-    x_extension_id: Optional[str] = None,
+    origin: str | None = None,
+    x_extension_id: str | None = None,
 ) -> None:
     """Accept iff Origin=chrome-extension://… OR X-Extension-Id is set. The latter
     covers GETs where Chrome strips Origin (host_permissions, same-origin-like).
@@ -81,7 +75,7 @@ def _check_extension(
 _EMAIL_RX = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
 
 
-async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> Optional[str]:
+async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> str | None:
     try:
         r = await client.get(f"https://gemini.google.com/u/{idx}/app", timeout=10.0)
     except Exception as e:
@@ -108,8 +102,8 @@ async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> Optional
 async def update_cookies(
     provider: str,
     payload: CookiesPayload,
-    origin: Optional[str] = Header(default=None),
-    x_extension_id: Optional[str] = Header(default=None),
+    origin: str | None = Header(default=None),
+    x_extension_id: str | None = Header(default=None),
 ):
     _check_extension(origin, x_extension_id)
     if provider == "gemini":
@@ -135,22 +129,22 @@ async def update_cookies(
     raise HTTPException(501, f"Provider '{provider}' is not wired on the server side yet.")
 
 
-@router.post("/accounts/{provider}", response_model=List[AccountInfo])
+@router.post("/accounts/{provider}", response_model=list[AccountInfo])
 async def list_accounts(
     provider: str,
     payload: CookiesPayload,
-    origin: Optional[str] = Header(default=None),
-    x_extension_id: Optional[str] = Header(default=None),
+    origin: str | None = Header(default=None),
+    x_extension_id: str | None = Header(default=None),
 ):
     _check_extension(origin, x_extension_id)
     if provider != "gemini":
         raise HTTPException(501, f"Provider '{provider}' not supported.")
-    cookies = {k: v for k, v in payload.cookies.items()}
-    headers = {"User-Agent": UA}
-    found: List[AccountInfo] = []
+    cookies = dict(payload.cookies)
+    headers = {"User-Agent": settings.PROBE_USER_AGENT}
+    found: list[AccountInfo] = []
     seen: set = set()
     async with httpx.AsyncClient(cookies=cookies, headers=headers, follow_redirects=True) as client:
-        for idx in range(0, 8):
+        for idx in range(8):
             email = await _probe_gemini_account(client, idx)
             if not email:
                 continue

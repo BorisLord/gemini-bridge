@@ -1,13 +1,13 @@
 import asyncio
+import contextlib
 import json
-import os
 import re
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from app import settings
 from app.logger import logger
 from schemas.request import OpenAIChatRequest
 from app.services.gemini_client import (
@@ -19,17 +19,14 @@ from gemini_webapi.exceptions import AuthError, TimeoutError as GeminiTimeoutErr
 
 router = APIRouter()
 
-# gemini-webapi only speaks free-form text. We ask Gemini to emit a delimited
-# JSON block per tool invocation, then parse those back into OpenAI-shaped
-# `tool_calls[]` so clients see native function calling.
-
+# gemini-webapi only speaks free-form text → we prompt Gemini to emit a
+# delimited JSON block, then parse it back into OpenAI `tool_calls[]`.
 _TOOL_CALL_RE = re.compile(r"<<TOOL_CALL>>\s*(\{.*?\})\s*<<END>>", re.DOTALL)
-# Backup: OpenCode-prompt-leaked text format `[tool_call:<name> for <args>]`.
+# OpenCode-prompt-leaked text format that some clients still emit.
 _TEXT_TOOL_CALL_RE = re.compile(r"\[tool_call:\s*(\w+)\s+for\s+(.+?)\]", re.DOTALL)
 
-# Gemini-3-pro tends to wrap string arguments as Markdown links `[X](Y)` or
-# code spans `` `X` ``, breaking downstream consumers (e.g. webfetch rejects
-# bracketed URLs). Strip those wrappers before forwarding the tool call.
+# Gemini-3-pro wraps string args in Markdown (`[X](Y)` or `` `X` ``) → breaks
+# downstream consumers (e.g. webfetch rejects bracketed URLs).
 _MD_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)$")
 _MD_CODE_RE = re.compile(r"^`([^`]+)`$")
 
@@ -52,7 +49,7 @@ def _sanitize_arg_string(s: str) -> str:
     return s
 
 
-def _strip_md_wrappers(value, _changes: Optional[list] = None):
+def _strip_md_wrappers(value, _changes: list | None = None):
     if isinstance(value, str):
         cleaned = _sanitize_arg_string(value)
         if _changes is not None and cleaned != value:
@@ -68,7 +65,7 @@ def _strip_md_wrappers(value, _changes: Optional[list] = None):
 def _build_tools_system_prompt(tools: list[dict]) -> str:
     rendered = []
     for t in tools:
-        # Accept both nested {type:"function", function:{...}} and flat {name, ...}.
+        # Tolerate both `{type:"function", function:{...}}` and flat `{name, ...}`.
         fn = t.get("function") or t
         desc_lines = (fn.get("description", "") or "").splitlines()
         first_line = desc_lines[0][:200] if desc_lines else ""
@@ -77,9 +74,8 @@ def _build_tools_system_prompt(tools: list[dict]) -> str:
             f"  description: {first_line}\n"
             f"  parameters (JSON Schema): {json.dumps(fn.get('parameters', {}))[:500]}"
         )
-    # Pick a sensible example using a tool that actually exists in this request.
-    # `bash` is preferred (illustrates a typical `command` arg); fall back to the
-    # first available tool otherwise.
+    # Pick an example tool that actually exists this request — `bash` first
+    # (typical `command` arg), then `read`, else fall back to the first available.
     tool_names_set = {(t.get("function") or t).get("name") for t in tools}
     if "bash" in tool_names_set:
         example_block = '{"name": "bash", "arguments": {"command": "ls -F", "description": "List files"}}'
@@ -176,39 +172,18 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
     return out
 
 
-# Verbose dumps (REQ.TOOL, REQ.MSG, PROMPT, full bodies) are gated by
-# GEMINI_BRIDGE_DEBUG=1 and tee'd to /tmp/gemini-bridge-debug.log.
-_VERBOSE_DEBUG = os.environ.get("GEMINI_BRIDGE_DEBUG", "").lower() in ("1", "true", "yes")
-
-# Hard cap on the rendered prompt length sent to Gemini Web. Empirically the
-# silent-abort threshold sits near ~100 KB on gemini-3-pro-advanced (logs show
-# 94 KB succeeding, 107 KB aborting); 90 KB leaves headroom. We trim the oldest
-# non-system messages and insert a placeholder when needed. Override with
-# GEMINI_BRIDGE_MAX_PROMPT_CHARS.
-_MAX_PROMPT_CHARS = int(os.environ.get("GEMINI_BRIDGE_MAX_PROMPT_CHARS", "100000"))
-
-# Cap on retained timestamped dumps under server/logs/prompts/. last.txt is
-# always kept on top of those.
-_PROMPT_DUMP_RETAIN = int(os.environ.get("GEMINI_BRIDGE_PROMPT_DUMP_RETAIN", "30"))
-# Off by default — dumps include the full conversation, possibly with secrets the
-# user pasted. Opt in with GEMINI_BRIDGE_DUMP_PROMPTS=1 (or GEMINI_BRIDGE_DEBUG=1).
-_DUMP_PROMPTS = (
-    _VERBOSE_DEBUG
-    or os.environ.get("GEMINI_BRIDGE_DUMP_PROMPTS", "").lower() in ("1", "true", "yes")
-)
-_DEBUG_LOG_PATH = Path("/tmp/gemini-bridge-debug.log")
-_DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024
+_DEBUG_LOG_PATH = Path(settings.DEBUG_LOG_PATH)
 
 
 def _dlog(tag: str, _verbose: bool = False, **fields) -> None:
     """Structured log. _verbose=True entries are dropped unless GEMINI_BRIDGE_DEBUG=1."""
-    if _verbose and not _VERBOSE_DEBUG:
+    if _verbose and not settings.DEBUG:
         return
     line = f"[{tag}] " + " | ".join(f"{k}={v!r}" if not isinstance(v, str) else f"{k}={v}" for k, v in fields.items())
     logger.info(line)
-    if _VERBOSE_DEBUG:
+    if settings.DEBUG:
         try:
-            if _DEBUG_LOG_PATH.exists() and _DEBUG_LOG_PATH.stat().st_size > _DEBUG_LOG_MAX_BYTES:
+            if _DEBUG_LOG_PATH.exists() and _DEBUG_LOG_PATH.stat().st_size > settings.DEBUG_LOG_MAX_BYTES:
                 _DEBUG_LOG_PATH.rename(_DEBUG_LOG_PATH.with_suffix(".log.1"))
             with _DEBUG_LOG_PATH.open("a") as f:
                 f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
@@ -224,27 +199,16 @@ def _truncate(s: str | None, n: int = 800) -> str:
     return f"{s[:n//2]}…[TRUNCATED {len(s)-n} chars]…{s[-n//2:]}"
 
 
-# Gemini Web silently aborts requests when the total prompt is too large.
 # Per-tier char budgets per tool result (free 32k tok, Pro/Ultra 1M tok).
-# `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS` overrides all tiers.
-_TIER_CAPS = {"free": 8_000, "plus": 32_000, "advanced": 128_000}
-_EXPLICIT_CAP = os.environ.get("GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS")
-MAX_TOOL_RESULT_CHARS = int(_EXPLICIT_CAP) if _EXPLICIT_CAP else _TIER_CAPS["free"]
-
-# gemini-webapi's retry decorator can stretch a doomed request to 60-120s while
-# re-initing the client. 90s leaves room for normal long generations on
-# gemini-3-pro-advanced. Override with GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS.
-GEMINI_REQUEST_TIMEOUT = float(os.environ.get("GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS", "90"))
+MAX_TOOL_RESULT_CHARS = settings.TIER_TOOL_RESULT_CAPS["free"]
 
 
 def _cap_for_model(model: str) -> int:
-    if _EXPLICIT_CAP:
-        return int(_EXPLICIT_CAP)
     if model.endswith("-advanced"):
-        return _TIER_CAPS["advanced"]
+        return settings.TIER_TOOL_RESULT_CAPS["advanced"]
     if model.endswith("-plus"):
-        return _TIER_CAPS["plus"]
-    return _TIER_CAPS["free"]
+        return settings.TIER_TOOL_RESULT_CAPS["plus"]
+    return settings.TIER_TOOL_RESULT_CAPS["free"]
 
 
 def _maybe_truncate_tool_result(content: str, cap: int = MAX_TOOL_RESULT_CHARS) -> tuple[str, bool]:
@@ -261,7 +225,6 @@ def _maybe_truncate_tool_result(content: str, cap: int = MAX_TOOL_RESULT_CHARS) 
 
 
 def _map_gemini_error(exc: Exception) -> HTTPException:
-    """Map an exception from the Gemini layer to the right HTTP status."""
     msg = str(exc).lower()
     if isinstance(exc, AuthError):
         return HTTPException(401, f"Gemini auth failed (cookies expired?): {exc}")
@@ -346,9 +309,7 @@ def _is_gemini_model(name: str) -> bool:
     return name.startswith("gemini-")
 
 
-# Mirrors `gemini_webapi.constants` — the IDs the upstream library accepts.
-# Powers /v1/models so OpenAI-speaking clients (Open WebUI, AnythingLLM, …)
-# can populate their model pickers automatically.
+# Mirrors `gemini_webapi.constants` — feeds /v1/models for client auto-discovery.
 GEMINI_MODEL_IDS = [
     "gemini-3-pro",
     "gemini-3-flash",
@@ -370,7 +331,7 @@ async def list_models():
     return {"object": "list", "data": items}
 
 
-def _trim_messages_to_fit(messages: list, tools: Optional[list], cap: int, max_chars: int) -> tuple[list, int]:
+def _trim_messages_to_fit(messages: list, tools: list | None, cap: int, max_chars: int) -> tuple[list, int]:
     """Drop oldest non-system messages and replace them with a single
     placeholder until the rendered prompt fits under `max_chars`. Always keeps
     every system message and at least the very last non-system message.
@@ -386,18 +347,17 @@ def _trim_messages_to_fit(messages: list, tools: Optional[list], cap: int, max_c
         "role": "user",
         "content": "[Earlier conversation elided to stay under Gemini Web's silent-abort threshold (~100 KB on gemini-3-pro-advanced).]",
     }
-    # Iteratively keep an ever-shorter tail until the prompt fits.
     for keep_n in range(len(rest), 0, -1):
         trimmed = system_msgs + ([placeholder] if keep_n < len(rest) else []) + rest[-keep_n:]
         rendered, _, _ = _build_prompt_from_messages(trimmed, tools, cap)
         if len(rendered) <= max_chars:
             return trimmed, len(rest) - keep_n
-    # Last resort: just system + placeholder + the very last message.
-    trimmed = system_msgs + [placeholder] + rest[-1:]
+    # Last resort: keep only system + placeholder + the very last message.
+    trimmed = [*system_msgs, placeholder, *rest[-1:]]
     return trimmed, len(rest) - 1
 
 
-def _build_prompt_from_messages(messages: list, tools: Optional[list], cap: int) -> tuple[str, int, int]:
+def _build_prompt_from_messages(messages: list, tools: list | None, cap: int) -> tuple[str, int, int]:
     """Render OpenAI-shaped messages into the textual format Gemini expects.
     Returns (final_prompt, truncated_results, dropped_chars)."""
     parts = []
@@ -476,7 +436,7 @@ async def chat_completions(request: OpenAIChatRequest):
     except GeminiClientNotInitializedError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 
-    if request.tools and _VERBOSE_DEBUG:
+    if request.tools and settings.DEBUG:
         for i, t in enumerate(request.tools[:3]):
             fn = t.get("function") or t
             _dlog("REQ.TOOL", _verbose=True, req=req_id, idx=i,
@@ -488,7 +448,7 @@ async def chat_completions(request: OpenAIChatRequest):
     # `messages: List[dict]` schema). Convert once at the boundary.
     messages_data = [m.model_dump(exclude_none=True) for m in request.messages]
 
-    if _VERBOSE_DEBUG:
+    if settings.DEBUG:
         for i, msg in enumerate(messages_data):
             role = msg.get("role", "?")
             content = msg.get("content")
@@ -509,14 +469,10 @@ async def chat_completions(request: OpenAIChatRequest):
         _dlog("TRUNCATE", req=req_id, results_truncated=truncated_tool_results,
               chars_dropped=total_truncated_chars, max_per_result=cap)
 
-    # Hard cap: head-tail trim if the rendered prompt would exceed Gemini
-    # Web's silent-abort threshold (~100 KB observed on gemini-3-pro-advanced;
-    # see _MAX_PROMPT_CHARS). Keeps system messages + tail; replaces
-    # the elided middle with a placeholder. Tool-result orphans are tolerated
-    # since Gemini just sees them as text.
-    if len(final_prompt) > _MAX_PROMPT_CHARS:
+    # Avoid Gemini Web's silent-abort: trim oldest non-system messages, leave a placeholder.
+    if len(final_prompt) > settings.MAX_PROMPT_CHARS:
         trimmed_msgs, trimmed_count = _trim_messages_to_fit(
-            messages_data, request.tools, cap, _MAX_PROMPT_CHARS,
+            messages_data, request.tools, cap, settings.MAX_PROMPT_CHARS,
         )
         final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
             trimmed_msgs, request.tools, cap,
@@ -530,10 +486,7 @@ async def chat_completions(request: OpenAIChatRequest):
           head=_truncate(final_prompt[:1500], 1500),
           tail=_truncate(final_prompt[-1500:], 1500))
 
-    # Opt-in dump of the full prompt sent to Gemini (one file per request).
-    # Off by default since prompts may contain user secrets — enable with
-    # GEMINI_BRIDGE_DUMP_PROMPTS=1.
-    if _DUMP_PROMPTS:
+    if settings.DUMP_PROMPTS:
         try:
             dump_dir = Path(__file__).resolve().parents[3] / "logs" / "prompts"
             dump_dir.mkdir(parents=True, exist_ok=True)
@@ -544,11 +497,9 @@ async def chat_completions(request: OpenAIChatRequest):
                  if p.is_file() and p.name != "last.txt" and p.suffix == ".txt"),
                 key=lambda p: p.stat().st_mtime,
             )
-            for stale in timestamped[:-_PROMPT_DUMP_RETAIN]:
-                try:
+            for stale in timestamped[:-settings.PROMPT_DUMP_RETAIN]:
+                with contextlib.suppress(OSError):
                     stale.unlink()
-                except OSError:
-                    pass
         except Exception as e:
             logger.warning(f"[shim] full-prompt dump failed: {e}")
 
@@ -568,10 +519,10 @@ async def chat_completions(request: OpenAIChatRequest):
                 files=None,
                 gem=get_selected_gem_id(),
             ),
-            timeout=GEMINI_REQUEST_TIMEOUT,
+            timeout=settings.REQUEST_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError as to_e:
-        e = GeminiTimeoutError(f"Gemini request exceeded {GEMINI_REQUEST_TIMEOUT}s (bridge-side cutoff)")
+        e = GeminiTimeoutError(f"Gemini request exceeded {settings.REQUEST_TIMEOUT_SECONDS}s (bridge-side cutoff)")
         raise _map_gemini_error(e) from to_e
     except Exception as e:
         mapped = _map_gemini_error(e)

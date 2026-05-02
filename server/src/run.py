@@ -1,8 +1,5 @@
 import argparse
-import asyncio
-import os
 import sys
-from typing import Tuple
 
 import uvicorn
 from fastapi.routing import APIRoute
@@ -15,6 +12,7 @@ except ImportError:
     except ImportError:
         tomli = None
 
+from app import settings
 from app.config import CONFIG
 from app.main import app
 from app.services.gemini_client import _resolve_cookies
@@ -27,7 +25,7 @@ class Colors:
     BOLD = "\033[1m"
 
 
-def get_app_info() -> Tuple[str, str]:
+def get_app_info() -> tuple[str, str]:
     if not tomli:
         return "Gemini Bridge", "N/A (tomli not installed)"
     try:
@@ -45,13 +43,12 @@ def get_app_info() -> Tuple[str, str]:
 def print_server_info(host: str, port: int):
     base_url = f"http://{host}:{port}"
     app_name, app_version = get_app_info()
-    docs_enabled = os.environ.get("GEMINI_BRIDGE_ENABLE_DOCS", "").lower() in ("1", "true", "yes")
     print("\n" + "=" * 80)
     print(f"{Colors.BOLD}{Colors.YELLOW}{f'{app_name} v{app_version}'.center(80)}{Colors.RESET}")
     print(f"{app_name} — OpenAI-compatible API on top of gemini.google.com".center(80))
     print("=" * 80)
     print("\nServices:")
-    if docs_enabled:
+    if settings.ENABLE_DOCS:
         print(f"  - Docs:   {base_url}/docs")
     print(f"  - Status: {base_url}/admin/status")
     print(f"\nConfig: browser={CONFIG['Browser']['name']} model={CONFIG['Gemini']['default_model']}")
@@ -64,18 +61,14 @@ def print_server_info(host: str, port: int):
 
 
 if __name__ == "__main__":
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
     parser = argparse.ArgumentParser(description="Run the Gemini Bridge FastAPI server.")
     parser.add_argument("--host", type=str, default="localhost", help="Host IP address")
     parser.add_argument("--port", type=int, default=6969, help="Port number")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reloading")
     args = parser.parse_args()
 
-    # Don't init the Gemini client here — uvicorn's lifespan does it inside the
-    # worker, on the right event loop. We only peek at cookie availability so
-    # the boot banner can hint whether the user needs the extension running.
+    # The lifespan hook owns init (right event loop). Here we only peek to set
+    # the banner hint about whether the extension is needed.
     psid, psidts = _resolve_cookies()
     if psid and psidts:
         print(f"INFO:     ✅ {Colors.CYAN}Gemini cookies found — initializing on startup{Colors.RESET}")
@@ -88,6 +81,5 @@ if __name__ == "__main__":
     try:
         uvicorn.Server(config).run()
     except KeyboardInterrupt:
-        # Py 3.11+ re-raises KeyboardInterrupt from asyncio.run; swallow to keep
-        # Ctrl+C clean after shutdown logs.
+        # Py 3.11+ re-raises KeyboardInterrupt from asyncio.run; swallow it for a clean Ctrl+C.
         print("\n[Bridge] Stopped.")
