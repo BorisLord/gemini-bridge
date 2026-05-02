@@ -1,13 +1,14 @@
+"""Wrapper around `gemini_webapi.GeminiClient` adding /u/{N}/ account routing
+and on-rotation cookie persistence to `config.conf`. Sits below the public
+service surface in `services.gemini_client`."""
 import configparser
-import logging
-import os
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
+
+from app.logger import logger
 from gemini_webapi import GeminiClient as WebGeminiClient
 
-logger = logging.getLogger("app")
-
-_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.conf"
+_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config.conf"
 
 
 def _inject_account_index(url: str, idx: int) -> str:
@@ -26,7 +27,7 @@ def _inject_account_index(url: str, idx: int) -> str:
     return urlunparse(parsed._replace(path=new_path))
 
 
-class MyGeminiClient:
+class BridgeGeminiClient:
     def __init__(
         self,
         secure_1psid: str,
@@ -87,10 +88,10 @@ class MyGeminiClient:
             # Atomic write so a mid-write crash can't truncate config.conf and
             # lose the rotated cookies.
             tmp = _CONFIG_PATH.with_suffix(_CONFIG_PATH.suffix + ".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
+            with tmp.open("w", encoding="utf-8") as f:
                 cfg.write(f)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, _CONFIG_PATH)
+            tmp.chmod(0o600)
+            tmp.replace(_CONFIG_PATH)
             logger.info("Cookies persisted to config.conf after rotation.")
         except Exception as e:
             logger.warning(f"Failed to persist cookies: {e}")

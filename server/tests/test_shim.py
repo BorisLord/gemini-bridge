@@ -1,18 +1,14 @@
 import json
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from app.endpoints.chat import (
+    MAX_TOOL_RESULT_CHARS,
     _build_prompt_from_messages,
     _build_tools_system_prompt,
     _extract_tool_calls,
     _maybe_truncate_tool_result,
     _strip_md_wrappers,
     _trim_messages_to_fit,
-    MAX_TOOL_RESULT_CHARS,
 )
 
 
@@ -69,7 +65,7 @@ class TestExtractToolCalls(unittest.TestCase):
         self.assertNotEqual(calls[0]["id"], calls[1]["id"])
 
     def test_invalid_json_skipped(self):
-        text = '<<TOOL_CALL>>{not valid json}<<END>>'
+        text = "<<TOOL_CALL>>{not valid json}<<END>>"
         calls = _extract_tool_calls(text, {"bash"})
         self.assertEqual(calls, [])
 

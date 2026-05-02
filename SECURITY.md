@@ -6,7 +6,7 @@ The bridge handles your **Google session cookies** (`__Secure-1PSID` / `-1PSIDTS
 
 **Don't**: expose port 6969 to a network, commit `config.conf` or `.env` (already in `.gitignore`), or load the extension without reviewing `extension/` (~600 LoC, no build step, no obfuscation).
 
-**Trust model on `/admin/*`**: the bridge requires `Origin: chrome-extension://…` or a non-empty `X-Extension-Id` header on admin endpoints. Both signals are spoofable by any local process — the actual defense is the loopback bind (`127.0.0.1`). Treat the header check as hygiene against accidental cross-extension calls, not as authentication. Don't run the bridge on a host where untrusted local users have shell access.
+**Trust model on `/runtime/*` and `/auth/*`**: the bridge requires `Origin: chrome-extension://…` or a non-empty `X-Extension-Id` header on these endpoints. Both signals are spoofable by any local process — the actual defense is the loopback bind (`127.0.0.1`). Treat the header check as hygiene against accidental cross-extension calls, not as authentication. Don't run the bridge on a host where untrusted local users have shell access.
 
 ## Reporting a vulnerability
 

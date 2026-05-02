@@ -4,20 +4,24 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from typing import Any, ClassVar
+
 from app import settings
 from app.logger import logger
-from schemas.request import OpenAIChatRequest
+from app.schemas.request import OpenAIChatRequest, err_response
 from app.services.gemini_client import (
+    GeminiClientNotInitializedError,
     get_gemini_client,
     get_selected_gem_id,
-    GeminiClientNotInitializedError,
 )
-from gemini_webapi.exceptions import AuthError, TimeoutError as GeminiTimeoutError
-
-router = APIRouter()
+from gemini_webapi.exceptions import AuthError
+from gemini_webapi.exceptions import TimeoutError as GeminiTimeoutError
+from litestar import Controller, get, post
+from litestar.enums import MediaType
+from litestar.exceptions import HTTPException
+from litestar.response import Response, ServerSentEvent
 
 # gemini-webapi only speaks free-form text → we prompt Gemini to emit a
 # delimited JSON block, then parse it back into OpenAI `tool_calls[]`.
@@ -49,7 +53,7 @@ def _sanitize_arg_string(s: str) -> str:
     return s
 
 
-def _strip_md_wrappers(value, _changes: list | None = None):
+def _strip_md_wrappers(value: Any, _changes: list | None = None) -> Any:
     if isinstance(value, str):
         cleaned = _sanitize_arg_string(value)
         if _changes is not None and cleaned != value:
@@ -95,7 +99,7 @@ def _build_tools_system_prompt(tools: list[dict]) -> str:
         "<<TOOL_CALL>>\n"
         '{"name": "<exact_tool_name>", "arguments": {<args object matching the parameters schema>}}\n'
         "<<END>>\n\n"
-        f"Concrete example (replace fields with what you need):\n"
+        "Concrete example (replace fields with what you need):\n"
         "<<TOOL_CALL>>\n"
         f"{example_block}\n"
         "<<END>>\n\n"
@@ -173,6 +177,7 @@ def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
 
 
 _DEBUG_LOG_PATH = Path(settings.DEBUG_LOG_PATH)
+_PROMPTS_DUMP_DIR = Path(__file__).resolve().parents[3] / "logs" / "prompts"
 
 
 def _dlog(tag: str, _verbose: bool = False, **fields) -> None:
@@ -181,14 +186,15 @@ def _dlog(tag: str, _verbose: bool = False, **fields) -> None:
         return
     line = f"[{tag}] " + " | ".join(f"{k}={v!r}" if not isinstance(v, str) else f"{k}={v}" for k, v in fields.items())
     logger.info(line)
-    if settings.DEBUG:
-        try:
-            if _DEBUG_LOG_PATH.exists() and _DEBUG_LOG_PATH.stat().st_size > settings.DEBUG_LOG_MAX_BYTES:
-                _DEBUG_LOG_PATH.rename(_DEBUG_LOG_PATH.with_suffix(".log.1"))
-            with _DEBUG_LOG_PATH.open("a") as f:
-                f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
-        except Exception:
-            pass
+    if not settings.DEBUG:
+        return
+    # Best-effort debug-log write. TOCTOU on rotation is benign under the
+    # single-worker contract; suppress so debug noise never breaks a request.
+    with contextlib.suppress(Exception):
+        if _DEBUG_LOG_PATH.exists() and _DEBUG_LOG_PATH.stat().st_size > settings.DEBUG_LOG_MAX_BYTES:
+            _DEBUG_LOG_PATH.rename(_DEBUG_LOG_PATH.with_suffix(".log.1"))
+        with _DEBUG_LOG_PATH.open("a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
 
 
 def _truncate(s: str | None, n: int = 800) -> str:
@@ -227,19 +233,20 @@ def _maybe_truncate_tool_result(content: str, cap: int = MAX_TOOL_RESULT_CHARS) 
 def _map_gemini_error(exc: Exception) -> HTTPException:
     msg = str(exc).lower()
     if isinstance(exc, AuthError):
-        return HTTPException(401, f"Gemini auth failed (cookies expired?): {exc}")
+        return HTTPException(status_code=401, detail=f"Gemini auth failed (cookies expired?): {exc}")
     if isinstance(exc, GeminiTimeoutError) or "timeout" in msg:
-        return HTTPException(504, f"Gemini upstream timed out: {exc}")
+        return HTTPException(status_code=504, detail=f"Gemini upstream timed out: {exc}")
     if any(k in msg for k in ("usage limit", "quota", "rate limit", "too many requests", "exceeded", "status: 429")):
-        return HTTPException(429, f"Gemini usage limit reached: {exc}")
+        return HTTPException(status_code=429, detail=f"Gemini usage limit reached: {exc}")
     if "status: 401" in msg or "status: 403" in msg:
-        return HTTPException(401, f"Gemini auth refused: {exc}")
+        return HTTPException(status_code=401, detail=f"Gemini auth refused: {exc}")
     # Captcha/abuse wall: Gemini redirects to /sorry/index (302).
     if "status: 302" in msg or "sorry" in msg:
-        return HTTPException(429, f"Gemini captcha wall (abuse detection): {exc}")
-    return HTTPException(502, f"Gemini upstream error: {exc}")
+        return HTTPException(status_code=429, detail=f"Gemini captcha wall (abuse detection): {exc}")
+    return HTTPException(status_code=502, detail=f"Gemini upstream error: {exc}")
 
-def convert_to_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None):
+
+def convert_to_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None) -> dict:
     if tool_calls:
         message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
         finish = "tool_calls"
@@ -256,7 +263,9 @@ def convert_to_openai_format(response_text: str, model: str, tool_calls: list[di
     }
 
 
-def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None):
+def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None) -> Iterator[str]:
+    """Yield raw JSON payloads (and the OpenAI sentinel `[DONE]`).
+    `ServerSentEvent` wraps each into `data: <payload>\\n\\n`."""
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
     first = {
@@ -264,7 +273,7 @@ def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] 
         "model": model,
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
     }
-    yield f"data: {json.dumps(first)}\n\n"
+    yield json.dumps(first)
 
     if tool_calls:
         delta_calls = [
@@ -281,14 +290,14 @@ def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] 
             "model": model,
             "choices": [{"index": 0, "delta": {"tool_calls": delta_calls}, "finish_reason": None}]
         }
-        yield f"data: {json.dumps(chunk)}\n\n"
+        yield json.dumps(chunk)
         end = {
             "id": chunk_id, "object": "chat.completion.chunk", "created": created,
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
         }
-        yield f"data: {json.dumps(end)}\n\n"
-        yield "data: [DONE]\n\n"
+        yield json.dumps(end)
+        yield "[DONE]"
         return
 
     content = {
@@ -296,14 +305,15 @@ def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] 
         "model": model,
         "choices": [{"index": 0, "delta": {"content": response_text}, "finish_reason": None}]
     }
-    yield f"data: {json.dumps(content)}\n\n"
+    yield json.dumps(content)
     end = {
         "id": chunk_id, "object": "chat.completion.chunk", "created": created,
         "model": model,
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
     }
-    yield f"data: {json.dumps(end)}\n\n"
-    yield "data: [DONE]\n\n"
+    yield json.dumps(end)
+    yield "[DONE]"
+
 
 def _is_gemini_model(name: str) -> bool:
     return name.startswith("gemini-")
@@ -323,14 +333,6 @@ GEMINI_MODEL_IDS = [
 ]
 
 
-@router.get("/v1/models")
-async def list_models():
-    now = int(time.time())
-    items = [{"id": m, "object": "model", "created": now, "owned_by": "gemini-bridge"}
-             for m in GEMINI_MODEL_IDS]
-    return {"object": "list", "data": items}
-
-
 def _trim_messages_to_fit(messages: list, tools: list | None, cap: int, max_chars: int) -> tuple[list, int]:
     """Drop oldest non-system messages and replace them with a single
     placeholder until the rendered prompt fits under `max_chars`. Always keeps
@@ -345,7 +347,10 @@ def _trim_messages_to_fit(messages: list, tools: list | None, cap: int, max_char
 
     placeholder = {
         "role": "user",
-        "content": "[Earlier conversation elided to stay under Gemini Web's silent-abort threshold (~100 KB on gemini-3-pro-advanced).]",
+        "content": (
+            "[Earlier conversation elided to stay under Gemini Web's silent-abort "
+            "threshold (~100 KB on gemini-3-pro-advanced).]"
+        ),
     }
     for keep_n in range(len(rest), 0, -1):
         trimmed = system_msgs + ([placeholder] if keep_n < len(rest) else []) + rest[-keep_n:]
@@ -382,7 +387,8 @@ def _build_prompt_from_messages(messages: list, tools: list | None, cap: int) ->
                     except json.JSONDecodeError as e:
                         logger.warning(f"[shim] tool args JSON parse failed: {e} — raw={raw_args[:200]!r}")
                         args_obj = {}
-                    blocks.append("<<TOOL_CALL>>\n" + json.dumps({"name": fn.get("name"), "arguments": args_obj}) + "\n<<END>>")
+                    payload = json.dumps({"name": fn.get("name"), "arguments": args_obj})
+                    blocks.append(f"<<TOOL_CALL>>\n{payload}\n<<END>>")
                 prefix = f"Assistant: {content}\n" if content else "Assistant: "
                 parts.append(prefix + "\n".join(blocks))
             elif content:
@@ -401,157 +407,187 @@ def _build_prompt_from_messages(messages: list, tools: list | None, cap: int) ->
     return "\n\n".join(parts), truncated, dropped
 
 
-@router.post("/v1/chat/completions")
-async def chat_completions(request: OpenAIChatRequest):
-    is_stream = request.stream if request.stream is not None else False
+class ChatController(Controller):
+    path = "/v1"
+    tags: ClassVar = ["chat"]
 
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="No messages provided.")
-    if not request.model:
-        raise HTTPException(status_code=400, detail="Model not specified in the request.")
+    @get("/models", summary="List Gemini models exposed via the bridge")
+    async def list_models(self) -> dict:
+        now = int(time.time())
+        items = [{"id": m, "object": "model", "created": now, "owned_by": "gemini-bridge"}
+                 for m in GEMINI_MODEL_IDS]
+        return {"object": "list", "data": items}
 
-    req_id = uuid.uuid4().hex[:8]
-    _dlog("REQ.HEAD", req=req_id, model=request.model, stream=is_stream,
-          msgs=len(request.messages),
-          tools=(len(request.tools) if request.tools else 0),
-          tool_choice=str(request.tool_choice) if request.tool_choice else None)
-
-    # Warn once per request when the client passes sampling knobs the bridge
-    # cannot forward (gemini-webapi has no equivalent setter).
-    _ignored_fields = [
-        f for f in (
-            "temperature", "top_p", "top_k", "max_tokens", "n", "seed",
-            "frequency_penalty", "presence_penalty", "response_format",
-            "stop", "logit_bias", "parallel_tool_calls",
-        ) if getattr(request, f, None) is not None
-    ]
-    if _ignored_fields:
-        logger.info(f"[REQ.IGNORED] req={req_id} | dropped (no Gemini Web equivalent): {_ignored_fields}")
-
-    if not _is_gemini_model(request.model):
-        raise HTTPException(400, f"Model '{request.model}' is not a Gemini model.")
-
-    try:
-        gemini_client = get_gemini_client()
-    except GeminiClientNotInitializedError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-
-    if request.tools and settings.DEBUG:
-        for i, t in enumerate(request.tools[:3]):
-            fn = t.get("function") or t
-            _dlog("REQ.TOOL", _verbose=True, req=req_id, idx=i,
-                  name=fn.get("name", "?"),
-                  desc_excerpt=_truncate(fn.get("description", ""), 200),
-                  params_keys=list((fn.get("parameters", {}) or {}).get("properties", {}).keys())[:8])
-
-    # Internal helpers expect plain dicts (back-compat with the previous
-    # `messages: List[dict]` schema). Convert once at the boundary.
-    messages_data = [m.model_dump(exclude_none=True) for m in request.messages]
-
-    if settings.DEBUG:
-        for i, msg in enumerate(messages_data):
-            role = msg.get("role", "?")
-            content = msg.get("content")
-            tcs = msg.get("tool_calls")
-            tcid = msg.get("tool_call_id")
-            _dlog("REQ.MSG", _verbose=True, req=req_id, idx=i, role=role, tcid=tcid,
-                  tool_calls_count=(len(tcs) if tcs else 0),
-                  content_len=(len(content) if isinstance(content, str) else None),
-                  content_excerpt=_truncate(content if isinstance(content, str) else json.dumps(content), 600))
-
-    cap = _cap_for_model(request.model)
-
-    final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
-        messages_data, request.tools, cap,
+    @post(
+        "/chat/completions",
+        status_code=200,
+        summary="OpenAI-compatible chat completion (SSE if stream=true)",
+        # Default to SSE so `ServerSentEvent.media_type` isn't overridden by the
+        # route-level default (Litestar's `to_asgi_response()` passes the route's
+        # media_type into the response, which wins over the response object's own).
+        # Non-stream replies explicitly wrap their dict in a JSON `Response`.
+        media_type="text/event-stream",
+        responses={
+            400: err_response("Missing/invalid messages, model field, or non-Gemini model."),
+            429: err_response("Gemini captcha wall or rate-limited (302 → /sorry/index)."),
+            502: err_response("Upstream Gemini Web error."),
+            503: err_response("Bridge not initialized — push cookies via /auth/cookies/gemini."),
+        },
     )
+    async def chat_completions(self, data: OpenAIChatRequest) -> Response | ServerSentEvent:
+        is_stream = data.stream if data.stream is not None else False
 
-    if truncated_tool_results:
-        _dlog("TRUNCATE", req=req_id, results_truncated=truncated_tool_results,
-              chars_dropped=total_truncated_chars, max_per_result=cap)
+        if not data.messages:
+            raise HTTPException(status_code=400, detail="No messages provided.")
+        if not data.model:
+            raise HTTPException(status_code=400, detail="Model not specified in the request.")
 
-    # Avoid Gemini Web's silent-abort: trim oldest non-system messages, leave a placeholder.
-    if len(final_prompt) > settings.MAX_PROMPT_CHARS:
-        trimmed_msgs, trimmed_count = _trim_messages_to_fit(
-            messages_data, request.tools, cap, settings.MAX_PROMPT_CHARS,
-        )
-        final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
-            trimmed_msgs, request.tools, cap,
-        )
-        _dlog("PROMPT.TRIM", req=req_id, dropped=trimmed_count,
-              kept_msgs=len(trimmed_msgs), final_chars=len(final_prompt))
+        req_id = uuid.uuid4().hex[:8]
+        _dlog("REQ.HEAD", req=req_id, model=data.model, stream=is_stream,
+              msgs=len(data.messages),
+              tools=(len(data.tools) if data.tools else 0),
+              tool_choice=str(data.tool_choice) if data.tool_choice else None)
 
-    if not final_prompt:
-        raise HTTPException(status_code=400, detail="No valid messages found.")
-    _dlog("PROMPT", _verbose=True, req=req_id, total_chars=len(final_prompt),
-          head=_truncate(final_prompt[:1500], 1500),
-          tail=_truncate(final_prompt[-1500:], 1500))
+        # Warn once per request when the client passes sampling knobs the bridge
+        # cannot forward (gemini-webapi has no equivalent setter).
+        _ignored_fields = [
+            f for f in (
+                "temperature", "top_p", "top_k", "max_tokens", "n", "seed",
+                "frequency_penalty", "presence_penalty", "response_format",
+                "stop", "logit_bias", "parallel_tool_calls",
+            ) if getattr(data, f, None) is not None
+        ]
+        if _ignored_fields:
+            logger.info(f"[REQ.IGNORED] req={req_id} | dropped (no Gemini Web equivalent): {_ignored_fields}")
 
-    if settings.DUMP_PROMPTS:
+        if not _is_gemini_model(data.model):
+            raise HTTPException(status_code=400, detail=f"Model '{data.model}' is not a Gemini model.")
+
+        # Lookup AFTER input validation so a bad model still gets a 400, not 503.
         try:
-            dump_dir = Path(__file__).resolve().parents[3] / "logs" / "prompts"
-            dump_dir.mkdir(parents=True, exist_ok=True)
-            (dump_dir / f"{int(time.time())}_{req_id}.txt").write_text(final_prompt)
-            (dump_dir / "last.txt").write_text(final_prompt)
-            timestamped = sorted(
-                (p for p in dump_dir.iterdir()
-                 if p.is_file() and p.name != "last.txt" and p.suffix == ".txt"),
-                key=lambda p: p.stat().st_mtime,
+            client = get_gemini_client()
+        except GeminiClientNotInitializedError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+
+        if data.tools and settings.DEBUG:
+            for i, t in enumerate(data.tools[:3]):
+                fn = t.get("function") or t
+                _dlog("REQ.TOOL", _verbose=True, req=req_id, idx=i,
+                      name=fn.get("name", "?"),
+                      desc_excerpt=_truncate(fn.get("description", ""), 200),
+                      params_keys=list((fn.get("parameters", {}) or {}).get("properties", {}).keys())[:8])
+
+        # Internal helpers expect plain dicts (back-compat with the previous
+        # `messages: List[dict]` schema). Convert once at the boundary.
+        messages_data = [m.model_dump(exclude_none=True) for m in data.messages]
+
+        if settings.DEBUG:
+            for i, msg in enumerate(messages_data):
+                role = msg.get("role", "?")
+                content = msg.get("content")
+                tcs = msg.get("tool_calls")
+                tcid = msg.get("tool_call_id")
+                _dlog("REQ.MSG", _verbose=True, req=req_id, idx=i, role=role, tcid=tcid,
+                      tool_calls_count=(len(tcs) if tcs else 0),
+                      content_len=(len(content) if isinstance(content, str) else None),
+                      content_excerpt=_truncate(content if isinstance(content, str) else json.dumps(content), 600))
+
+        cap = _cap_for_model(data.model)
+
+        final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
+            messages_data, data.tools, cap,
+        )
+
+        if truncated_tool_results:
+            _dlog("TRUNCATE", req=req_id, results_truncated=truncated_tool_results,
+                  chars_dropped=total_truncated_chars, max_per_result=cap)
+
+        # Avoid Gemini Web's silent-abort: trim oldest non-system messages, leave a placeholder.
+        if len(final_prompt) > settings.MAX_PROMPT_CHARS:
+            trimmed_msgs, trimmed_count = _trim_messages_to_fit(
+                messages_data, data.tools, cap, settings.MAX_PROMPT_CHARS,
             )
-            for stale in timestamped[:-settings.PROMPT_DUMP_RETAIN]:
-                with contextlib.suppress(OSError):
-                    stale.unlink()
+            final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
+                trimmed_msgs, data.tools, cap,
+            )
+            _dlog("PROMPT.TRIM", req=req_id, dropped=trimmed_count,
+                  kept_msgs=len(trimmed_msgs), final_chars=len(final_prompt))
+
+        if not final_prompt:
+            raise HTTPException(status_code=400, detail="No valid messages found.")
+        _dlog("PROMPT", _verbose=True, req=req_id, total_chars=len(final_prompt),
+              head=_truncate(final_prompt[:1500], 1500),
+              tail=_truncate(final_prompt[-1500:], 1500))
+
+        if settings.DUMP_PROMPTS:
+            try:
+                _PROMPTS_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+                (_PROMPTS_DUMP_DIR / f"{int(time.time())}_{req_id}.txt").write_text(final_prompt)
+                (_PROMPTS_DUMP_DIR / "last.txt").write_text(final_prompt)
+                timestamped = sorted(
+                    (p for p in _PROMPTS_DUMP_DIR.iterdir()
+                     if p.is_file() and p.name != "last.txt" and p.suffix == ".txt"),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                for stale in timestamped[:-settings.PROMPT_DUMP_RETAIN]:
+                    with contextlib.suppress(OSError):
+                        stale.unlink()
+            except Exception as e:
+                logger.warning(f"[shim] full-prompt dump failed: {e}")
+
+        t0 = time.time()
+
+        _dlog("PROMPT.STAT", req=req_id,
+              msgs_total=len(data.messages),
+              prompt_chars=len(final_prompt),
+              has_tools=bool(data.tools),
+              tools_count=(len(data.tools) if data.tools else 0))
+
+        try:
+            response = await asyncio.wait_for(
+                client.generate_content(
+                    message=final_prompt,
+                    model=data.model,
+                    files=None,
+                    gem=get_selected_gem_id(),
+                ),
+                timeout=settings.REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as to_e:
+            e = GeminiTimeoutError(f"Gemini request exceeded {settings.REQUEST_TIMEOUT_SECONDS}s (bridge-side cutoff)")
+            raise _map_gemini_error(e) from to_e
         except Exception as e:
-            logger.warning(f"[shim] full-prompt dump failed: {e}")
+            mapped = _map_gemini_error(e)
+            _dlog("GEMINI.ERR", req=req_id, err_type=type(e).__name__, err=_truncate(str(e), 500))
+            logger.error(f"Error in /v1/chat/completions endpoint: {e}", exc_info=True)
+            raise mapped from e
 
-    t0 = time.time()
+        raw_text = response.text or ""
+        _dlog("GEMINI.OK", req=req_id, latency_s=round(time.time() - t0, 2), resp_chars=len(raw_text))
+        _dlog("GEMINI.BODY", _verbose=True, req=req_id, resp_full=_truncate(raw_text, 2500))
 
-    _dlog("PROMPT.STAT", req=req_id,
-          msgs_total=len(request.messages),
-          prompt_chars=len(final_prompt),
-          has_tools=bool(request.tools),
-          tools_count=(len(request.tools) if request.tools else 0))
+        tool_names: set[str] = set()
+        if data.tools:
+            for t in data.tools:
+                fn = t.get("function") or t
+                n = fn.get("name")
+                if n:
+                    tool_names.add(n)
+        tool_calls = _extract_tool_calls(raw_text, tool_names) if data.tools else []
+        final_text = _TOOL_CALL_RE.sub("", _TEXT_TOOL_CALL_RE.sub("", raw_text)).strip() if tool_calls else raw_text
+        _dlog("SHIM", req=req_id, tool_calls_extracted=len(tool_calls),
+              first_call=(json.dumps(tool_calls[0]) if tool_calls else None),
+              fallback_used=bool(tool_calls and not _TOOL_CALL_RE.search(raw_text)))
 
-    try:
-        response = await asyncio.wait_for(
-            gemini_client.generate_content(
-                message=final_prompt,
-                model=request.model,
-                files=None,
-                gem=get_selected_gem_id(),
-            ),
-            timeout=settings.REQUEST_TIMEOUT_SECONDS,
+        if is_stream:
+            _dlog("RESP.STREAM", req=req_id, mode="sse", with_tool_calls=bool(tool_calls))
+            # ServerSentEvent wraps each yielded payload as `data: …\n\n` and
+            # auto-sets Cache-Control / Connection / X-Accel-Buffering headers.
+            return ServerSentEvent(
+                stream_openai_format(final_text, data.model, tool_calls or None),
+            )
+        _dlog("RESP.JSON", req=req_id, mode="json", with_tool_calls=bool(tool_calls))
+        return Response(
+            content=convert_to_openai_format(final_text, data.model, tool_calls or None),
+            media_type=MediaType.JSON,
         )
-    except asyncio.TimeoutError as to_e:
-        e = GeminiTimeoutError(f"Gemini request exceeded {settings.REQUEST_TIMEOUT_SECONDS}s (bridge-side cutoff)")
-        raise _map_gemini_error(e) from to_e
-    except Exception as e:
-        mapped = _map_gemini_error(e)
-        _dlog("GEMINI.ERR", req=req_id, err_type=type(e).__name__, err=_truncate(str(e), 500))
-        logger.error(f"Error in /v1/chat/completions endpoint: {e}", exc_info=True)
-        raise mapped from e
-
-    raw_text = response.text or ""
-    _dlog("GEMINI.OK", req=req_id, latency_s=round(time.time() - t0, 2), resp_chars=len(raw_text))
-    _dlog("GEMINI.BODY", _verbose=True, req=req_id, resp_full=_truncate(raw_text, 2500))
-
-    tool_names: set[str] = set()
-    if request.tools:
-        for t in request.tools:
-            fn = t.get("function") or t
-            n = fn.get("name")
-            if n:
-                tool_names.add(n)
-    tool_calls = _extract_tool_calls(raw_text, tool_names) if request.tools else []
-    final_text = _TOOL_CALL_RE.sub("", _TEXT_TOOL_CALL_RE.sub("", raw_text)).strip() if tool_calls else raw_text
-    _dlog("SHIM", req=req_id, tool_calls_extracted=len(tool_calls),
-          first_call=(json.dumps(tool_calls[0]) if tool_calls else None),
-          fallback_used=bool(tool_calls and not _TOOL_CALL_RE.search(raw_text)))
-
-    if is_stream:
-        _dlog("RESP.STREAM", req=req_id, mode="sse", with_tool_calls=bool(tool_calls))
-        return StreamingResponse(
-            stream_openai_format(final_text, request.model, tool_calls or None),
-            media_type="text/event-stream",
-        )
-    _dlog("RESP.JSON", req=req_id, mode="json", with_tool_calls=bool(tool_calls))
-    return convert_to_openai_format(final_text, request.model, tool_calls or None)
