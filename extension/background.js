@@ -38,7 +38,7 @@ async function setSelectedIndex(providerId, idx) {
 
 async function fetchServerStatus() {
   try {
-    const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/status`);
+    const res = await bridgeFetch(`${SERVER_BASE_URL}/runtime/status`);
     if (res.ok) {
       return { ...(await res.json()), reachable: true };
     }
@@ -142,10 +142,16 @@ function schedulePushProvider(provider, reason) {
   _pushTimers.set(provider.id, t);
 }
 
+function domainMatches(cookieDomain, filter) {
+  // `endsWith(filter)` alone matches `evil-google.com` when filter=`google.com`.
+  // Require either an exact host match or a true subdomain (leading dot).
+  return cookieDomain === filter || cookieDomain.endsWith(`.${filter}`);
+}
+
 chrome.cookies.onChanged.addListener(({ cookie, removed }) => {
   if (removed) return;
   for (const p of PROVIDERS) {
-    if (cookie.domain.endsWith(p.cookieFilter) && p.cookieNames.includes(cookie.name)) {
+    if (domainMatches(cookie.domain, p.cookieFilter) && p.cookieNames.includes(cookie.name)) {
       schedulePushProvider(p, `cookie:${cookie.name}`);
       return;
     }
@@ -174,7 +180,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ done: true });
     } else if (msg?.type === "select-gem") {
       try {
-        const res = await bridgeFetch(`${SERVER_BASE_URL}/admin/gem`, {
+        const res = await bridgeFetch(`${SERVER_BASE_URL}/runtime/gem`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gem_id: msg.gem_id || null }),
