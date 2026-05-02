@@ -1,4 +1,13 @@
-export const SERVER_BASE_URL = "http://localhost:6969";
+export const DEFAULT_SERVER_BASE_URL = "http://localhost:6969";
+
+// Reads the user's override from chrome.storage.local; falls back to the
+// default. Exported as an async accessor so any rebind takes effect on the
+// next call without reloading the extension.
+export async function getServerBaseUrl() {
+  const { serverBaseUrl } = await chrome.storage.local.get("serverBaseUrl");
+  const trimmed = (serverBaseUrl || "").trim().replace(/\/+$/, "");
+  return trimmed || DEFAULT_SERVER_BASE_URL;
+}
 
 export const PROVIDERS = [
   {
