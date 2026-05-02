@@ -1,7 +1,11 @@
 # --- Browser Settings ---
-# Supported: chrome, firefox, brave, edge, safari
+# Supported: firefox, librewolf, chrome, chromium, brave, edge, opera,
+# opera_gx, vivaldi. Used only for the local headless fallback when no
+# extension is loaded and `GEMINI_COOKIE_*` env vars are unset. Firefox is
+# recommended — Chromium-family cookies are device-bound on 2025+ Chrome and
+# trigger silent aborts on Pro models.
 [Browser]
-name = chrome
+name = firefox
 
 # --- Gemini Model Configuration ---
 # default_model is informational — clients pick per request.

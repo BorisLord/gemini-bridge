@@ -5,7 +5,7 @@ from pathlib import Path
 
 from loguru import logger as _loguru
 
-# 5 MB × 4 backups = ~20 MB cap at <repo>/server/logs/bridge.log.
+# 5 MB x 4 backups = ~20 MB cap at <repo>/server/logs/bridge.log.
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "bridge.log"

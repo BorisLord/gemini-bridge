@@ -62,9 +62,7 @@ orjson==3.11.8
 pycparser==2.22 ; implementation_name != 'PyPy'
     # via cffi
 pycryptodomex==3.21.0
-    # via
-    #   gemini-bridge (pyproject.toml)
-    #   browser-cookie3
+    # via browser-cookie3
 pydantic==2.12.5
     # via
     #   fastapi
@@ -76,9 +74,7 @@ pygments==2.20.0
 python-dotenv==1.2.2
     # via uvicorn
 pywin32==311 ; sys_platform == 'win32'
-    # via
-    #   gemini-bridge (pyproject.toml)
-    #   wmi
+    # via wmi
 pyyaml==6.0.3
     # via uvicorn
 rich==15.0.0
