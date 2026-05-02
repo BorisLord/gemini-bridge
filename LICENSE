@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2026 Boris Lord
+Portions Copyright (c) 2023-2025 Amm1rr/WebAI-to-API contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +21,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----
-
-The vendored copy of Amm1rr/WebAI-to-API in `server/` retains its own MIT
-license — see `server/LICENSE` and `NOTICE.md`.
