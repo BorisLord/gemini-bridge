@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/BorisLord/gemini-bridge?include_prereleases&sort=semver)](https://github.com/BorisLord/gemini-bridge/releases)
 
-Local FastAPI + Chrome extension that exposes your **Google Gemini subscription** as an **OpenAI-compatible API** on `http://localhost:6969/v1`. Any client speaking `/v1/chat/completions` (OpenCode, Cline, Continue, Aider, Codex, `curl`…) drives Gemini 3 Pro / Flash / Thinking through your browser quota — no API key, multi-account ready (`/u/0`, `/u/1`, …).
+Local Litestar server + Chrome extension that exposes your **Google Gemini subscription** as an **OpenAI-compatible API** on `http://localhost:6969/v1`. Any client speaking `/v1/chat/completions` (OpenCode, Cline, Continue, Aider, Codex, `curl`…) drives Gemini 3 Pro / Flash / Thinking through your browser quota — no API key, multi-account ready (`/u/0`, `/u/1`, …).
 
 ```
 Chrome ──cookies──▶ localhost:6969 ──/v1/chat/completions──▶ OpenCode / curl / …
@@ -115,7 +115,7 @@ Single source of truth: [`server/src/app/settings.py`](server/src/app/settings.p
 | Name | Default | Effect |
 |---|---|---|
 | `GEMINI_BRIDGE_PORT` | `6969` | Bind port. Must match `extension/providers.js`. |
-| `GEMINI_BRIDGE_ENABLE_DOCS` | unset | `1` exposes `/docs`, `/redoc`, `/openapi.json`. Off by default to keep the admin surface invisible. |
+| `GEMINI_BRIDGE_ENABLE_DOCS` | unset | `1` exposes Stoplight Elements at `/docs` (schema at `/docs/openapi.json`). Off by default to keep the admin surface invisible. |
 | `GEMINI_BRIDGE_DEBUG` | unset | `1` enables verbose logs to console + `/tmp/gemini-bridge-debug.log`. Implies `DUMP_PROMPTS`. |
 | `GEMINI_BRIDGE_DUMP_PROMPTS` | unset | `1` writes each rendered prompt to `server/logs/prompts/`. Off by default — prompts may carry user secrets. |
 | `GEMINI_BRIDGE_MAX_PROMPT_CHARS` | `100000` | Hard cap on the rendered prompt sent to Gemini Web (silent-abort guardrail). |
@@ -129,11 +129,11 @@ Single source of truth: [`server/src/app/settings.py`](server/src/app/settings.p
 |---|---|---|---|
 | `POST` | `/v1/chat/completions` | none | OpenAI chat. Streaming + tool calls. |
 | `GET` | `/v1/models` | none | OpenAI model list (drives picker auto-discovery). |
-| `GET` | `/healthz` | none | Liveness probe. |
+| `GET` | `/healthz` | none | Health check. |
 | `POST` | `/auth/cookies/{provider}` | extension | Push fresh Google cookies. |
 | `POST` | `/auth/accounts/{provider}` | extension | Probe `/u/0…7` for signed-in emails. |
-| `GET` | `/admin/status` | extension | Bridge state. |
-| `POST` | `/admin/gem` | extension | Set active Gem (URL or ID). |
+| `GET` | `/runtime/status` | extension | Bridge state. |
+| `POST` | `/runtime/gem` | extension | Set active Gem (URL or ID). |
 
 "Extension" = `Origin: chrome-extension://…` OR `X-Extension-Id` header. The bridge binds loopback only — it's CSRF hygiene, not authn.
 
@@ -189,7 +189,7 @@ A previous `X-Session-Affinity` / `X-Session-Id` header path (forwarding only th
 | Path | What it is |
 |---|---|
 | `extension/` | Chrome MV3 (cookie sync + popup controls). |
-| `server/` | FastAPI server (Gemini wrapper). |
+| `server/` | Litestar server (Gemini wrapper). |
 | `examples/opencode.jsonc` | Drop-in OpenCode config. |
 | `systemd/` | User-service unit. |
 | `start.sh` | Setup-on-first-run launcher. |
@@ -198,4 +198,4 @@ Tests: `mise run test` (or `cd server && python -m unittest discover tests -v` w
 
 ## License
 
-MIT — Copyright (c) 2026 Boris Lord. Forked from [`Amm1rr/WebAI-to-API`](https://github.com/Amm1rr/WebAI-to-API) (MIT) — original copyright preserved in `server/LICENSE`.
+MIT — Copyright (c) 2026 Boris Lord. Original attribution preserved in [`LICENSE`](LICENSE).

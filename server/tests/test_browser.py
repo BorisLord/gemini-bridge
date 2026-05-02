@@ -1,11 +1,7 @@
 """Tests for the local-browser cookie fallback. Mocks `browser_cookie3` at the
 boundary; CONFIG['Browser'] is patched per case to avoid touching the real one."""
-import os
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from app.utils.browser import _LOADERS, get_cookie_from_browser
 

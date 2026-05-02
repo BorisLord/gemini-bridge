@@ -6,14 +6,22 @@
 # /v1/chat/completions). `start.sh` always launches a single worker.
 import contextlib
 import re
+from typing import Literal
 
-from models.gemini import MyGeminiClient
 from app import settings
 from app.config import CONFIG
 from app.logger import logger
+from app.services.gemini_wrapper import BridgeGeminiClient
 from app.utils.browser import get_cookie_from_browser
-
 from gemini_webapi.exceptions import AuthError
+
+RefreshResult = Literal["refreshed", "deduped", "failed"]
+# Boot-time outcomes — distinct so the lifespan can log them differently.
+# - "ok"          : client up, ready to serve
+# - "no-cookies"  : soft, expected on fresh installs (extension will push them)
+# - "auth-failed" : cookies provided but Google rejected them (user-actionable)
+# - "error"       : unexpected exception during init (bug or upstream outage)
+InitResult = Literal["ok", "no-cookies", "auth-failed", "error"]
 
 
 class GeminiClientNotInitializedError(Exception):
@@ -43,10 +51,7 @@ _GEM_URL_RX = re.compile(r"/gem/([a-zA-Z0-9_-]+)")
 def set_selected_gem_id(gem_id_or_url: str | None) -> None:
     """Accepts a raw ID or a full gemini.google.com URL; empty/None clears."""
     global _selected_gem_id
-    if not gem_id_or_url:
-        _selected_gem_id = None
-        return
-    raw = gem_id_or_url.strip()
+    raw = (gem_id_or_url or "").strip()
     if not raw:
         _selected_gem_id = None
         return
@@ -56,8 +61,8 @@ def set_selected_gem_id(gem_id_or_url: str | None) -> None:
 
 def _resolve_cookies() -> tuple[str | None, str | None]:
     """Precedence: env > config.conf > browser_cookie3 fallback."""
-    psid = settings.cookie_1psid_env() or CONFIG["Cookies"].get("gemini_cookie_1PSID")
-    psidts = settings.cookie_1psidts_env() or CONFIG["Cookies"].get("gemini_cookie_1PSIDTS")
+    psid = settings.cookie_1psid_env() or CONFIG["Cookies"].get("gemini_cookie_1psid")
+    psidts = settings.cookie_1psidts_env() or CONFIG["Cookies"].get("gemini_cookie_1psidts")
     if not psid or not psidts:
         from_browser = get_cookie_from_browser("gemini")
         if from_browser:
@@ -86,7 +91,7 @@ def _resolve_initial_gem_id() -> str | None:
     return None
 
 
-async def init_gemini_client() -> bool:
+async def init_gemini_client() -> InitResult:
     global _gemini_client, _initialization_error, _selected_gem_id
     _initialization_error = None
 
@@ -101,9 +106,9 @@ async def init_gemini_client() -> bool:
                 "or ensure your browser is logged in."
             )
             logger.warning(_initialization_error)
-            return False
+            return "no-cookies"
 
-        _gemini_client = MyGeminiClient(
+        _gemini_client = BridgeGeminiClient(
             secure_1psid=psid,
             secure_1psidts=psidts,
             proxy=proxy,
@@ -117,18 +122,18 @@ async def init_gemini_client() -> bool:
                 logger.info(f"Pre-selected Gem from config: {_selected_gem_id!r}")
 
         logger.info("Gemini client initialized successfully.")
-        return True
+        return "ok"
 
     except AuthError as e:
         _initialization_error = f"Gemini authentication failed: {e} (cookies expired/invalid)"
         logger.error(_initialization_error)
         _gemini_client = None
-        return False
+        return "auth-failed"
     except Exception as e:
         _initialization_error = f"Unexpected error initializing Gemini client: {e}"
         logger.error(_initialization_error, exc_info=True)
         _gemini_client = None
-        return False
+        return "error"
 
 
 async def refresh_gemini_client(
@@ -136,8 +141,8 @@ async def refresh_gemini_client(
     psidts: str,
     account_index: int = 0,
     extra_cookies: dict | None = None,
-) -> str:
-    """Hot-rotate auth without restarting. Returns "refreshed" / "deduped" / "failed"."""
+) -> RefreshResult:
+    """Hot-rotate auth without restarting."""
     global _gemini_client, _initialization_error, _last_refresh_signature
     # Include the full extras dict in the signature so a rotated SAPISID forces
     # a real refresh even if 1PSID didn't change.
@@ -148,7 +153,7 @@ async def refresh_gemini_client(
 
     proxy = CONFIG["Proxy"].get("http_proxy") or None
     try:
-        new_client = MyGeminiClient(
+        new_client = BridgeGeminiClient(
             secure_1psid=psid,
             secure_1psidts=psidts,
             proxy=proxy,
@@ -175,7 +180,7 @@ async def refresh_gemini_client(
     return "refreshed"
 
 
-def get_gemini_client():
+def get_gemini_client() -> BridgeGeminiClient:
     if _gemini_client is None:
         error_detail = _initialization_error or "Gemini client was not initialized. Check logs for details."
         raise GeminiClientNotInitializedError(error_detail)

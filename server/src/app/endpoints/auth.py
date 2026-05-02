@@ -1,29 +1,21 @@
 import re
-import httpx
-from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from typing import ClassVar
 
+import httpx
 from app import settings
+from app.guards import extension_only
+from app.logger import logger
+from app.schemas.request import err_response
 from app.services.gemini_client import (
-    refresh_gemini_client,
     get_selected_gem_id,
+    refresh_gemini_client,
     set_selected_gem_id,
 )
-from app.logger import logger
+from litestar import Controller, get, post
+from litestar.exceptions import HTTPException
+from pydantic import BaseModel, Field
 
-router = APIRouter(prefix="/auth", tags=["auth"])
-status_router = APIRouter(prefix="/admin", tags=["admin"])
-
-
-@status_router.get("/status")
-async def get_status(
-    origin: str | None = Header(default=None),
-    x_extension_id: str | None = Header(default=None),
-):
-    _check_extension(origin, x_extension_id)
-    return {
-        "gem": {"selected_id": get_selected_gem_id()},
-    }
+_FORBIDDEN = err_response("Origin is not chrome-extension:// and X-Extension-Id is missing.")
 
 
 class GemSelection(BaseModel):
@@ -31,45 +23,16 @@ class GemSelection(BaseModel):
     gem_id: str | None = None
 
 
-@status_router.post("/gem")
-async def select_gem(
-    payload: GemSelection,
-    origin: str | None = Header(default=None),
-    x_extension_id: str | None = Header(default=None),
-):
-    _check_extension(origin, x_extension_id)
-    set_selected_gem_id(payload.gem_id)
-    # Don't interpolate `origin`/`x_extension_id` — both are spoofable by any
-    # local process and would let a caller plant arbitrary strings into logs.
-    logger.info(f"Gem selection updated: {get_selected_gem_id()!r}")
-    return {"selected_id": get_selected_gem_id()}
-
-
 class CookiesPayload(BaseModel):
     cookies: dict[str, str]
-    account_index: int = Field(default=0, ge=0, le=20)
+    # Chrome supports up to 8 simultaneous Google profiles → /u/0 … /u/7. Mirrors the
+    # range scanned by `_probe_gemini_account` so the API and the probe can't disagree.
+    account_index: int = Field(default=0, ge=0, le=7)
 
 
 class AccountInfo(BaseModel):
     index: int
     email: str
-
-
-def _check_extension(
-    origin: str | None = None,
-    x_extension_id: str | None = None,
-) -> None:
-    """Accept iff Origin=chrome-extension://… OR X-Extension-Id is set. The latter
-    covers GETs where Chrome strips Origin (host_permissions, same-origin-like).
-    CSRF/inter-extension hygiene — not real authn (both signals are spoofable)."""
-    if origin and origin.startswith("chrome-extension://"):
-        return
-    if x_extension_id:
-        return
-    raise HTTPException(
-        403,
-        "Origin must be chrome-extension:// or request must carry X-Extension-Id header.",
-    )
 
 
 _EMAIL_RX = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
@@ -98,59 +61,96 @@ async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> str | No
     return None
 
 
-@router.post("/cookies/{provider}")
-async def update_cookies(
-    provider: str,
-    payload: CookiesPayload,
-    origin: str | None = Header(default=None),
-    x_extension_id: str | None = Header(default=None),
-):
-    _check_extension(origin, x_extension_id)
-    if provider == "gemini":
-        psid = payload.cookies.get("__Secure-1PSID")
-        psidts = payload.cookies.get("__Secure-1PSIDTS")
+class RuntimeController(Controller):
+    path = "/runtime"
+    guards: ClassVar = [extension_only]
+    tags: ClassVar = ["runtime"]
+
+    @get(
+        "/status",
+        summary="Bridge status — currently selected Gem ID",
+        responses={403: _FORBIDDEN},
+    )
+    async def get_status(self) -> dict:
+        return {"gem": {"selected_id": get_selected_gem_id()}}
+
+    @post(
+        "/gem",
+        status_code=200,
+        summary="Select / clear active Gem",
+        responses={403: _FORBIDDEN},
+    )
+    async def select_gem(self, data: GemSelection) -> dict:
+        set_selected_gem_id(data.gem_id)
+        # Don't interpolate request headers — they are spoofable by any local
+        # process and would let a caller plant arbitrary strings into logs.
+        logger.info(f"Gem selection updated: {get_selected_gem_id()!r}")
+        return {"selected_id": get_selected_gem_id()}
+
+
+class AuthController(Controller):
+    path = "/auth"
+    guards: ClassVar = [extension_only]
+    tags: ClassVar = ["auth"]
+
+    @post(
+        "/cookies/{provider:str}",
+        status_code=200,
+        summary="Push Google session cookies",
+        responses={
+            400: err_response("Missing __Secure-1PSID or __Secure-1PSIDTS in body."),
+            403: _FORBIDDEN,
+            501: err_response("Provider other than 'gemini' is not wired."),
+            502: err_response("Authentication failed with the provided cookies."),
+        },
+    )
+    async def update_cookies(self, provider: str, data: CookiesPayload) -> dict:
+        if provider != "gemini":
+            raise HTTPException(
+                status_code=501,
+                detail=f"Provider '{provider}' is not wired on the server side yet.",
+            )
+        psid = data.cookies.get("__Secure-1PSID")
+        psidts = data.cookies.get("__Secure-1PSIDTS")
         if not psid or not psidts:
-            raise HTTPException(400, "Missing __Secure-1PSID or __Secure-1PSIDTS")
+            raise HTTPException(status_code=400, detail="Missing __Secure-1PSID or __Secure-1PSIDTS")
         result = await refresh_gemini_client(
             psid, psidts,
-            account_index=payload.account_index,
-            extra_cookies=payload.cookies,
+            account_index=data.account_index,
+            extra_cookies=data.cookies,
         )
         if result == "failed":
-            raise HTTPException(502, "Failed to authenticate with provided cookies")
+            raise HTTPException(status_code=502, detail="Failed to authenticate with provided cookies")
         if result == "refreshed":
-            logger.info(f"Provider 'gemini' refreshed (u/{payload.account_index})")
+            logger.info(f"Provider 'gemini' refreshed (u/{data.account_index})")
         return {
             "status": "ok",
             "provider": provider,
-            "account_index": payload.account_index,
+            "account_index": data.account_index,
             "deduped": result == "deduped",
         }
-    raise HTTPException(501, f"Provider '{provider}' is not wired on the server side yet.")
 
-
-@router.post("/accounts/{provider}", response_model=list[AccountInfo])
-async def list_accounts(
-    provider: str,
-    payload: CookiesPayload,
-    origin: str | None = Header(default=None),
-    x_extension_id: str | None = Header(default=None),
-):
-    _check_extension(origin, x_extension_id)
-    if provider != "gemini":
-        raise HTTPException(501, f"Provider '{provider}' not supported.")
-    cookies = dict(payload.cookies)
-    headers = {"User-Agent": settings.PROBE_USER_AGENT}
-    found: list[AccountInfo] = []
-    seen: set = set()
-    async with httpx.AsyncClient(cookies=cookies, headers=headers, follow_redirects=True) as client:
-        for idx in range(8):
-            email = await _probe_gemini_account(client, idx)
-            if not email:
-                continue
-            if email in seen:
-                # Same email twice = /u/N wrapped around (idx out of range).
-                break
-            seen.add(email)
-            found.append(AccountInfo(index=idx, email=email))
-    return found
+    @post(
+        "/accounts/{provider:str}",
+        status_code=200,
+        summary="Probe /u/N pages to list authenticated accounts",
+        responses={403: _FORBIDDEN, 501: err_response("Provider other than 'gemini' is not wired.")},
+    )
+    async def list_accounts(self, provider: str, data: CookiesPayload) -> list[AccountInfo]:
+        if provider != "gemini":
+            raise HTTPException(status_code=501, detail=f"Provider '{provider}' not supported.")
+        cookies = dict(data.cookies)
+        headers = {"User-Agent": settings.PROBE_USER_AGENT}
+        found: list[AccountInfo] = []
+        seen: set[str] = set()
+        async with httpx.AsyncClient(cookies=cookies, headers=headers, follow_redirects=True) as client:
+            for idx in range(8):
+                email = await _probe_gemini_account(client, idx)
+                if not email:
+                    continue
+                if email in seen:
+                    # Same email twice = /u/N wrapped around (idx out of range).
+                    break
+                seen.add(email)
+                found.append(AccountInfo(index=idx, email=email))
+        return found

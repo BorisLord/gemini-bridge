@@ -1,13 +1,8 @@
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from fastapi.testclient import TestClient
-
-from app.main import app
 from app.endpoints.chat import GEMINI_MODEL_IDS
+from app.main import app
+from litestar.testing import TestClient
 
 
 class TestListModels(unittest.TestCase):

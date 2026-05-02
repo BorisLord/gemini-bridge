@@ -1,8 +1,8 @@
 import configparser
-import logging
+import contextlib
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from app.logger import logger
 
 # Anchor to <repo>/server/config.conf so the file's location doesn't drift with
 # the caller's CWD (tests run from the repo root used to spawn one there).
@@ -11,12 +11,10 @@ _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.conf"
 
 def load_config(config_file: str | Path = _DEFAULT_CONFIG_PATH) -> configparser.ConfigParser:
     config = configparser.ConfigParser()
+    # configparser.read() silently ignores missing files (returns []) so no
+    # FileNotFoundError to catch — write below creates the file unconditionally.
     try:
         config.read(config_file, encoding="utf-8")
-    except FileNotFoundError:
-        logger.warning(
-            f"Config file '{config_file}' not found. Creating a default one."
-        )
     except Exception as e:
         logger.error(f"Error reading config file: {e}")
 
@@ -29,9 +27,14 @@ def load_config(config_file: str | Path = _DEFAULT_CONFIG_PATH) -> configparser.
     if "Proxy" not in config:
         config["Proxy"] = {"http_proxy": ""}
 
+    path = Path(config_file)
     try:
-        with open(config_file, "w", encoding="utf-8") as f:
+        with path.open("w", encoding="utf-8") as f:
             config.write(f)
+        # Cookies are session-equivalent secrets — owner-only from the start,
+        # not just after the first refresh in `models.gemini._persist_cookies`.
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
     except Exception as e:
         logger.error(f"Error writing to config file: {e}")
 

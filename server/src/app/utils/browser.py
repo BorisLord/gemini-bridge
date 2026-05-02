@@ -1,16 +1,12 @@
 """Local-browser cookie fallback. Reached only when the extension isn't
 loaded and `GEMINI_COOKIE_*` / `config.conf` are empty. Linux/macOS only —
 Windows users go through WSL or paste cookies."""
-import logging
-from typing import Literal
 from collections.abc import Callable
+from typing import Literal
 
 import browser_cookie3
-
 from app.config import CONFIG
-
-logger = logging.getLogger(__name__)
-
+from app.logger import logger
 
 _LOADERS: dict[str, Callable] = {
     "firefox": browser_cookie3.firefox,

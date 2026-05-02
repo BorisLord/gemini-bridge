@@ -1,8 +1,8 @@
 import argparse
 import sys
+from pathlib import Path
 
 import uvicorn
-from fastapi.routing import APIRoute
 
 try:
     import tomli
@@ -29,7 +29,7 @@ def get_app_info() -> tuple[str, str]:
     if not tomli:
         return "Gemini Bridge", "N/A (tomli not installed)"
     try:
-        with open("pyproject.toml", "rb") as f:
+        with Path("pyproject.toml").open("rb") as f:
             toml_data = tomli.load(f)
         project_data = toml_data.get("project", {})
         name = project_data.get("name", "gemini-bridge").replace("-", " ").title()
@@ -50,18 +50,16 @@ def print_server_info(host: str, port: int):
     print("\nServices:")
     if settings.ENABLE_DOCS:
         print(f"  - Docs:   {base_url}/docs")
-    print(f"  - Status: {base_url}/admin/status")
+    print(f"  - Status: {base_url}/runtime/status")
     print(f"\nConfig: browser={CONFIG['Browser']['name']} model={CONFIG['Gemini']['default_model']}")
     print("\nEndpoints:")
-    paths = sorted({route.path for route in app.routes if isinstance(route, APIRoute)})
-    for path in paths:
-        if path not in ("/docs", "/redoc", "/openapi.json"):
-            print(f"  - {base_url}{path}")
+    for path in sorted(app.route_handler_method_map.keys()):
+        print(f"  - {base_url}{path}")
     print("\n" + "=" * 80)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the Gemini Bridge FastAPI server.")
+    parser = argparse.ArgumentParser(description="Run the Gemini Bridge Litestar server.")
     parser.add_argument("--host", type=str, default="localhost", help="Host IP address")
     parser.add_argument("--port", type=int, default=6969, help="Port number")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reloading")
