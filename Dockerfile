@@ -25,7 +25,7 @@ FROM python:3.13-slim
 WORKDIR /app/server
 COPY --from=builder /app/server/.venv /app/server/.venv
 COPY server/src ./src
-COPY server/pyproject.toml server/config.conf.example server/LICENSE ./
+COPY server/pyproject.toml server/config.conf.example ./
 RUN cp config.conf.example /opt/config.conf.default
 
 ENV PATH="/app/server/.venv/bin:$PATH" \
