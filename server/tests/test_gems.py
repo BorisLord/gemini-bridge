@@ -1,17 +1,12 @@
 """Auto-detect was dropped (Google's LIST_GEMS RPC is unreliable); user pastes
 URL or bare ID directly."""
 import os
-import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from fastapi.testclient import TestClient
-
 from app.main import app
 from app.services import gemini_client as gc
-
+from litestar.testing import TestClient
 
 CHROME_ORIGIN = "chrome-extension://abcdefghijklmnop"
 
@@ -62,7 +57,7 @@ class TestSelectGemEndpoint(unittest.TestCase):
 
     def test_post_bare_id(self):
         r = self.client.post(
-            "/admin/gem",
+            "/runtime/gem",
             headers={"Origin": CHROME_ORIGIN},
             json={"gem_id": "abc-123"},
         )
@@ -71,7 +66,7 @@ class TestSelectGemEndpoint(unittest.TestCase):
 
     def test_post_full_url_extracts_id(self):
         r = self.client.post(
-            "/admin/gem",
+            "/runtime/gem",
             headers={"Origin": CHROME_ORIGIN},
             json={"gem_id": "https://gemini.google.com/u/1/gem/0eb07ff2fcd3"},
         )
@@ -81,7 +76,7 @@ class TestSelectGemEndpoint(unittest.TestCase):
     def test_post_empty_clears(self):
         gc.set_selected_gem_id("xyz")
         r = self.client.post(
-            "/admin/gem",
+            "/runtime/gem",
             headers={"Origin": CHROME_ORIGIN},
             json={"gem_id": ""},
         )
@@ -90,11 +85,11 @@ class TestSelectGemEndpoint(unittest.TestCase):
 
     def test_status_reflects_selection(self):
         self.client.post(
-            "/admin/gem",
+            "/runtime/gem",
             headers={"Origin": CHROME_ORIGIN},
             json={"gem_id": "https://gemini.google.com/u/0/gem/eb0eb9162487"},
         )
-        r = self.client.get("/admin/status", headers={"Origin": CHROME_ORIGIN})
+        r = self.client.get("/runtime/status", headers={"Origin": CHROME_ORIGIN})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["gem"]["selected_id"], "eb0eb9162487")
 
@@ -156,7 +151,7 @@ class TestGemEnvBoot(unittest.TestCase):
         os.environ.pop("GEMINI_BRIDGE_GEM_ID", None)
         gc._selected_gem_id = None
 
-    @patch.object(gc.MyGeminiClient, "init", new_callable=AsyncMock)
+    @patch.object(gc.BridgeGeminiClient, "init", new_callable=AsyncMock)
     def test_env_gem_id_applied_at_init(self, _mock_init):
         os.environ["GEMINI_COOKIE_1PSID"] = "fake-psid"
         os.environ["GEMINI_COOKIE_1PSIDTS"] = "fake-psidts"

@@ -1,6 +1,24 @@
 from typing import Any, Literal
 
+from litestar.openapi.datastructures import ResponseSpec
 from pydantic import BaseModel, ConfigDict
+
+
+class OpenAIErrorBody(BaseModel):
+    """OpenAI-compat error envelope produced by `_http_exc_handler`."""
+    message: str
+    type: str
+    param: str | None = None
+    code: str | None = None
+
+
+class OpenAIErrorResponse(BaseModel):
+    error: OpenAIErrorBody
+
+
+def err_response(description: str) -> ResponseSpec:
+    """Shorthand for an OpenAI-shaped error response in OpenAPI metadata."""
+    return ResponseSpec(data_container=OpenAIErrorResponse, description=description)
 
 
 class ChatMessage(BaseModel):

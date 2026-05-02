@@ -6,9 +6,9 @@ authors = [
     { name = "Boris Lord", email = "106592312+BorisLord@users.noreply.github.com" },
 ]
 license = { text = "MIT" }
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.13,<4.0"
 dependencies = [
-    "fastapi>=0.136.1,<0.140.0",
+    "litestar>=2.18.0,<3.0.0",
     "browser-cookie3>=0.20.1,<0.21.0",
     "httpx>=0.28.1,<0.29.0",
     "curl-cffi>=0.15.0,<0.16.0",
