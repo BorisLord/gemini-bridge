@@ -15,9 +15,9 @@ You're paying for **Gemini AI Pro / Ultra**, but agentic coding clients (OpenCod
 
 ## Install
 
-All paths require a Chromium-based browser signed into `gemini.google.com`.
+All paths require a browser signed into `gemini.google.com`. The Chrome MV3 extension covers Chrome / Edge / Brave / Vivaldi / any Chromium fork; Firefox users go through the headless cookie path (`.env` or `[Browser].name` in `config.conf`, see [Headless / no-extension flow](#headless--no-extension-flow)).
 
-**Native** (Linux / macOS, WSL on Windows) — needs `git` + [`uv`](https://docs.astral.sh/uv/getting-started/installation/). [`mise`](https://mise.jdx.dev/) users get `uv`/`ruff`/`pip-audit` pinned via `mise.toml` (`mise install` instead).
+**Native** — Linux or macOS. Windows users need WSL (the bridge no longer ships native Windows DPAPI cookie decryption). Requires `git` + [`uv`](https://docs.astral.sh/uv/getting-started/installation/). [`mise`](https://mise.jdx.dev/) users get `uv`/`ruff`/`pip-audit` pinned via `mise.toml` (`mise install` instead).
 
 ```bash
 git clone https://github.com/BorisLord/gemini-bridge && cd gemini-bridge
@@ -110,14 +110,15 @@ curl -s http://localhost:6969/v1/chat/completions \
 
 ## Environment variables
 
-Precedence everywhere: **env > `config.conf` > extension/popup runtime**.
+Single source of truth: [`server/src/app/settings.py`](server/src/app/settings.py). Precedence everywhere: **env > `config.conf` > extension/popup runtime**.
 
 | Name | Default | Effect |
 |---|---|---|
 | `GEMINI_BRIDGE_PORT` | `6969` | Bind port. Must match `extension/providers.js`. |
-| `GEMINI_BRIDGE_DEBUG` | unset | `1` enables verbose logs to console + `/tmp/gemini-bridge-debug.log`. |
-| `GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS` | `30` | Hard cutoff per Gemini call. |
-| `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS` | tier-adaptive | Override the per-tier cap (8k/32k/128k). |
+| `GEMINI_BRIDGE_ENABLE_DOCS` | unset | `1` exposes `/docs`, `/redoc`, `/openapi.json`. Off by default to keep the admin surface invisible. |
+| `GEMINI_BRIDGE_DEBUG` | unset | `1` enables verbose logs to console + `/tmp/gemini-bridge-debug.log`. Implies `DUMP_PROMPTS`. |
+| `GEMINI_BRIDGE_DUMP_PROMPTS` | unset | `1` writes each rendered prompt to `server/logs/prompts/`. Off by default — prompts may carry user secrets. |
+| `GEMINI_BRIDGE_MAX_PROMPT_CHARS` | `100000` | Hard cap on the rendered prompt sent to Gemini Web (silent-abort guardrail). |
 | `GEMINI_COOKIE_1PSID` / `_1PSIDTS` | from config / browser | Headless cookie auth. |
 | `GEMINI_BRIDGE_ACCOUNT_INDEX` | `0` | Multi-account `/u/N` selection. |
 | `GEMINI_BRIDGE_GEM_ID` | unset | Pre-select a Gem at boot. |
@@ -146,7 +147,7 @@ Each tool-result message is head+tail truncated before being sent to Gemini, siz
 | Pro (`-plus`) | ~32k chars |
 | Ultra (`-advanced`) | ~128k chars |
 
-Override globally with `GEMINI_BRIDGE_MAX_TOOL_RESULT_CHARS=<n>`.
+Caps live in [`settings.TIER_TOOL_RESULT_CAPS`](server/src/app/settings.py) — edit there if you've measured a different threshold.
 
 ## Prompt sizing & head-tail trimming
 

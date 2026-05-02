@@ -33,7 +33,8 @@ Health check: `curl http://localhost:6969/healthz`.
 | `server/src/app/endpoints/chat.py` | `/v1/chat/completions`, `/v1/models`, prompt building, tool-call shim |
 | `server/src/app/endpoints/auth.py` | `/auth/cookies/{provider}`, `/auth/accounts/{provider}`, `/admin/status`, `/admin/gem` |
 | `server/src/app/services/gemini_client.py` | `gemini-webapi` wrapper, module-level globals `_gemini_client` + `_selected_gem_id` |
-| `server/src/app/utils/browser.py` | Cookie extraction via `browser_cookie3` + Windows DPAPI |
+| `server/src/app/utils/browser.py` | Linux/macOS fallback that reads Gemini cookies via `browser_cookie3` (Firefox-family or any Chromium-family browser per `[Browser].name`) |
+| `server/src/app/settings.py` | Centralised env-var reading. Add new `GEMINI_BRIDGE_*` knobs here, not inline. |
 | `server/src/schemas/request.py` | `OpenAIChatRequest` + typed `ChatMessage` Pydantic models for `/v1/chat/completions` |
 | `server/tests/` | stdlib `unittest` suites (chat handler, admin checks, env resolvers, shim) |
 | `extension/` | Chrome MV3 — `popup.{html,js}`, `background.js`, `providers.js`, `manifest.json` |
