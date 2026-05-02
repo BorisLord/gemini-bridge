@@ -181,6 +181,11 @@ async function render() {
     block.appendChild(subDiv);
 
     if (accts.length > 0) {
+      const countDiv = document.createElement("div");
+      countDiv.className = "sub";
+      countDiv.textContent = `${accts.length} account${accts.length > 1 ? "s" : ""} detected`;
+      block.appendChild(countDiv);
+
       const acctSelect = document.createElement("select");
       acctSelect.className = "acctsel";
       acctSelect.dataset.provider = p.id;
@@ -192,6 +197,12 @@ async function render() {
         acctSelect.appendChild(o);
       }
       block.appendChild(acctSelect);
+
+      const hint = document.createElement("div");
+      hint.className = "sub";
+      hint.style.marginTop = "4px";
+      hint.textContent = "Account not listed? Sign in to it at gemini.google.com, then click Detect again.";
+      block.appendChild(hint);
     }
 
     const detectBtn = document.createElement("button");

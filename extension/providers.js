@@ -6,7 +6,8 @@ export const PROVIDERS = [
     label: "Gemini",
     cookieDomainUrl: "https://gemini.google.com",
     cookieFilter: "google.com",
-    // First two are required for auth refresh; the rest enable multi-account /u/{N} resolution.
+    // First two are required for auth refresh; the rest enable multi-account /u/{N}
+    // resolution against gemini.google.com.
     cookieNames: [
       "__Secure-1PSID", "__Secure-1PSIDTS",
       "SID", "HSID", "SSID", "SAPISID", "APISID", "__Secure-1PSIDCC",
