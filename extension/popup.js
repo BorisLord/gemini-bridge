@@ -1,4 +1,4 @@
-import { PROVIDERS, SERVER_BASE_URL } from "./providers.js";
+import { PROVIDERS, getServerBaseUrl } from "./providers.js";
 
 async function loadState() {
   const { statuses = {}, accounts = {}, selections = {} } = await chrome.storage.local.get([
@@ -21,20 +21,22 @@ function esc(s) {
     .replaceAll("'", "&#39;");
 }
 
-function renderServer(status) {
+async function renderServer(status) {
   const $ = document.getElementById("server");
+  const base = await getServerBaseUrl();
   if (!status || !status.reachable) {
-    $.innerHTML = `<span class="err">Server not reachable at ${esc(SERVER_BASE_URL)}</span>
+    $.innerHTML = `<span class="err">Server not reachable at ${esc(base)}</span>
                    <div class="sub">Start the bridge with one of:
                      <ul style="margin:4px 0 0 16px;padding:0">
                        <li><code>./start.sh</code> (native)</li>
                        <li><code>docker compose up -d</code></li>
                        <li><code>systemctl --user start gemini-bridge</code></li>
                      </ul>
+                     If the bridge runs on a non-default port, set it under <strong>Server URL</strong> below.
                    </div>`;
     return;
   }
-  $.innerHTML = `<div>Server reachable · Gemini active</div>`;
+  $.innerHTML = `<div>Server reachable · Gemini active <span class="sub">at ${esc(base)}</span></div>`;
 }
 
 function renderGem(status) {
@@ -122,7 +124,7 @@ function renderGemPrompt() {
 
 async function render() {
   const status = await fetchStatus();
-  renderServer(status);
+  await renderServer(status);
   renderGem(status);
 
   document.getElementById("gem-apply")?.addEventListener("click", applyGemFromInput);
@@ -245,7 +247,58 @@ document.getElementById("gem-enabled").addEventListener("change", async (e) => {
   }
 });
 
+async function refreshSettingsUi() {
+  const stored = (await chrome.storage.local.get("serverBaseUrl")).serverBaseUrl || "";
+  const enabled = !!stored;
+  document.getElementById("settings-enabled").checked = enabled;
+  document.getElementById("settings").classList.toggle("hidden", !enabled);
+  document.getElementById("server-url").value = stored;
+  document.getElementById("server-error").textContent = "";
+}
+
+function isValidServerUrl(raw) {
+  try {
+    const u = new URL(raw);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+document.getElementById("settings-enabled").addEventListener("change", async (e) => {
+  document.getElementById("settings").classList.toggle("hidden", !e.target.checked);
+  if (!e.target.checked) {
+    await chrome.storage.local.remove("serverBaseUrl");
+    await chrome.runtime.sendMessage({ type: "sync-now" });
+    await refreshSettingsUi();
+    setTimeout(render, 200);
+  }
+});
+
+document.getElementById("server-save").addEventListener("click", async () => {
+  const raw = (document.getElementById("server-url").value || "").trim();
+  const errEl = document.getElementById("server-error");
+  if (raw && !isValidServerUrl(raw)) {
+    errEl.textContent = "Invalid URL — must start with http:// or https://";
+    return;
+  }
+  errEl.textContent = "";
+  if (raw) {
+    await chrome.storage.local.set({ serverBaseUrl: raw });
+  } else {
+    await chrome.storage.local.remove("serverBaseUrl");
+  }
+  const btn = document.getElementById("server-save");
+  const originalLabel = btn.textContent;
+  btn.textContent = "✓ Saved";
+  setTimeout(() => { btn.textContent = originalLabel; }, 1000);
+  await chrome.runtime.sendMessage({ type: "sync-now" });
+  await refreshSettingsUi();
+  setTimeout(render, 200);
+});
+
 (async () => {
+  await refreshSettingsUi();
   chrome.runtime.sendMessage({ type: "sync-now" });
   await render();
   setTimeout(render, 600);

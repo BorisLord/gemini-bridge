@@ -39,6 +39,21 @@
   </div>
   <div id="gem" class="section-block hidden">Loading…</div>
 
+  <div class="section-header">
+    <label class="toggle">
+      <input id="settings-enabled" type="checkbox" />
+      <span>Change server URL (advanced only)</span>
+    </label>
+  </div>
+  <div id="settings" class="section-block hidden">
+    <div class="keyrow">
+      <input id="server-url" type="text" placeholder="http://localhost:6969" />
+      <button id="server-save">Save</button>
+    </div>
+    <div id="server-error" class="err"></div>
+    <div class="sub">Override the default <code>http://localhost:6969</code> if the bridge runs on another host or port.</div>
+  </div>
+
   <h2>Providers</h2>
   <div id="providers">Loading…</div>
   <button id="sync">Sync now</button>
