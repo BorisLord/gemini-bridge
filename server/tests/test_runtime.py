@@ -32,11 +32,30 @@ class TestRuntimeOriginChecks(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
 
     def test_status_rejects_non_extension_origin(self):
-        # Anything not starting with chrome-extension:// must be 403, regardless of scheme.
-        for origin in ("http://evil.local", "https://evil.com", "moz-extension://abc", "null"):
+        # Anything not starting with chrome-extension:// or moz-extension:// must be 403.
+        for origin in ("http://evil.local", "https://evil.com", "safari-web-extension://abc", "null"):
             with self.subTest(origin=origin):
                 r = self.client.get("/runtime/status", headers={"Origin": origin})
                 self.assertEqual(r.status_code, 403)
+
+    def test_firefox_origin_accepted_on_all_guarded_endpoints(self):
+        # Firefox extensions identify themselves with moz-extension://<uuid>;
+        # the contract is the same as chrome-extension:// across every endpoint
+        # under `extension_only`. A regression on /runtime/status alone wouldn't
+        # catch a Guard rebuild that drops moz from /auth/*.
+        moz = "moz-extension://12345678-1234-1234-1234-123456789abc"
+        with patch("app.endpoints.auth.refresh_gemini_client",
+                   new=AsyncMock(return_value="refreshed")):
+            cases = [
+                ("GET", "/runtime/status", None),
+                ("POST", "/runtime/gem", {"gem_id": "x"}),
+                ("POST", "/auth/cookies/gemini",
+                 {"cookies": {"__Secure-1PSID": "x", "__Secure-1PSIDTS": "y"}, "account_index": 0}),
+            ]
+            for method, path, body in cases:
+                with self.subTest(method=method, path=path):
+                    r = self.client.request(method, path, headers={"Origin": moz}, json=body)
+                    self.assertNotEqual(r.status_code, 403, f"{method} {path} rejected with Firefox origin")
 
     def test_gem_post_requires_origin(self):
         r = self.client.post("/runtime/gem", json={"gem_id": "anything"})
