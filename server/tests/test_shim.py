@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from app.endpoints.chat import (  # noqa: E402
+from app.endpoints.chat import (
     _build_prompt_from_messages,
     _build_tools_system_prompt,
     _extract_tool_calls,

@@ -4,10 +4,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from app.main import app  # noqa: E402
-from app.endpoints.chat import GEMINI_MODEL_IDS  # noqa: E402
+from app.main import app
+from app.endpoints.chat import GEMINI_MODEL_IDS
 
 
 class TestListModels(unittest.TestCase):
