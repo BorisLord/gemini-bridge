@@ -35,7 +35,18 @@ class AccountInfo(BaseModel):
     email: str
 
 
-_EMAIL_RX = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+# Modern Gemini Web embeds the user email inside inline JSON as "user@host".
+# A loose `\w+@\w+` only catches `googlers@google.com` (which is filtered out),
+# so we anchor on the quoted form to land on the real account.
+_EMAIL_QUOTED_RX = re.compile(r'"([\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})"')
+
+
+def _is_user_email(email: str) -> bool:
+    if email.endswith("@google.com"):
+        return False
+    if "noreply" in email or "no-reply" in email:
+        return False
+    return not email.endswith("@gemini.google.com")
 
 
 async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> str | None:
@@ -46,18 +57,12 @@ async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> str | No
         return None
     if r.status_code != 200:
         return None
-    # /u/{idx} redirected to /u/0 means the index is out of range.
     final_path = str(r.url.path)
     if idx > 0 and (final_path.startswith("/u/0") or final_path == "/app"):
         return None
-    for email in _EMAIL_RX.findall(r.text[:300000]):
-        if email.endswith("@google.com"):
-            continue
-        if "noreply" in email or "no-reply" in email:
-            continue
-        if email.endswith("@gemini.google.com"):
-            continue
-        return email
+    for email in _EMAIL_QUOTED_RX.findall(r.text[:600000]):
+        if _is_user_email(email):
+            return email
     return None
 
 
@@ -149,7 +154,6 @@ class AuthController(Controller):
                 if not email:
                     continue
                 if email in seen:
-                    # Same email twice = /u/N wrapped around (idx out of range).
                     break
                 seen.add(email)
                 found.append(AccountInfo(index=idx, email=email))
