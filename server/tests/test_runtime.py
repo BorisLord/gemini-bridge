@@ -39,10 +39,7 @@ class TestRuntimeOriginChecks(unittest.TestCase):
                 self.assertEqual(r.status_code, 403)
 
     def test_firefox_origin_accepted_on_all_guarded_endpoints(self):
-        # Firefox extensions identify themselves with moz-extension://<uuid>;
-        # the contract is the same as chrome-extension:// across every endpoint
-        # under `extension_only`. A regression on /runtime/status alone wouldn't
-        # catch a Guard rebuild that drops moz from /auth/*.
+        # Cover every endpoint under `extension_only`; status alone wouldn't catch a Guard regression on /auth/*.
         moz = "moz-extension://12345678-1234-1234-1234-123456789abc"
         with patch("app.endpoints.auth.refresh_gemini_client",
                    new=AsyncMock(return_value="refreshed")):
