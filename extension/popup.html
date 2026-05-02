@@ -15,7 +15,7 @@
     .ok { color: #137333; font-size: 12px; }
     .err { color: #c5221f; font-size: 12px; word-break: break-word; }
     .sub { font-size: 11px; color: #888; margin: 2px 0; }
-    .acctsel, .modelsel { width: 100%; margin: 4px 0; padding: 4px; font-size: 12px; }
+    .acctsel { width: 100%; margin: 4px 0; padding: 4px; font-size: 12px; }
     .keyrow { display: flex; gap: 4px; margin: 4px 0; }
     .keyrow input { flex: 1; padding: 4px; font-size: 12px; font-family: monospace; }
     button { padding: 5px 10px; font-size: 11px; cursor: pointer; margin-right: 4px; }
@@ -23,7 +23,7 @@
     #sync { margin-top: 4px; background: #1a73e8; color: #fff; border: none; padding: 6px 12px; }
     .toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
     .toggle input { transform: scale(1.1); }
-    .or-block { padding: 8px; background: #fafafa; border-radius: 4px; margin-bottom: 10px; }
+    .section-block { padding: 8px; background: #fafafa; border-radius: 4px; margin-bottom: 10px; }
     .hidden { display: none; }
   </style>
 </head>
@@ -37,7 +37,7 @@
       <span>Gemini Gem</span>
     </label>
   </div>
-  <div id="gem" class="or-block hidden">Loading…</div>
+  <div id="gem" class="section-block hidden">Loading…</div>
 
   <h2>Providers</h2>
   <div id="providers">Loading…</div>
