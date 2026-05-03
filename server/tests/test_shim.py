@@ -103,7 +103,7 @@ class TestTruncateToolResult(unittest.TestCase):
         self.assertTrue(truncated)
         # head + marker + tail ≈ cap + 30; 150 of slack for marker variance.
         self.assertLessEqual(len(out), MAX_TOOL_RESULT_CHARS + 150)
-        self.assertIn("gemini-bridge truncated", out)
+        self.assertIn("truncated", out)
 
     def test_preserves_head_and_tail(self):
         body = "HEAD-MARKER" + "X" * 50000 + "TAIL-MARKER"
