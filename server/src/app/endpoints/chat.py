@@ -224,7 +224,7 @@ def _maybe_truncate_tool_result(content: str, cap: int = MAX_TOOL_RESULT_CHARS) 
     tail = cap - head - 80
     return (
         content[:head]
-        + f"\n\n…[gemini-bridge truncated {len(content) - cap} chars to stay under upstream prompt limits]…\n\n"
+        + f"\n\n…[truncated {len(content) - cap} chars to stay under upstream prompt limits]…\n\n"
         + content[-tail:],
         True,
     )
