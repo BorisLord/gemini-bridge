@@ -2,7 +2,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from app import settings
-from app.endpoints.auth import AuthController, RuntimeController
+from app.endpoints.auth import AccountsController, AuthController, RuntimeController
 from app.endpoints.chat import ChatController
 from app.logger import logger
 from app.services.gemini_client import init_gemini_client
@@ -106,7 +106,7 @@ _CORS = CORSConfig(
 
 
 app = Litestar(
-    route_handlers=[HealthController, ChatController, AuthController, RuntimeController],
+    route_handlers=[HealthController, ChatController, AuthController, RuntimeController, AccountsController],
     lifespan=[_lifespan],
     cors_config=_CORS,
     compression_config=_COMPRESSION,

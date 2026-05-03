@@ -4,16 +4,21 @@
 # worker its own copy and break refresh-via-/auth/cookies (the worker that
 # served /auth/cookies is not necessarily the one that handles the next
 # /v1/chat/completions). `start.sh` always launches a single worker.
+import configparser
 import contextlib
 import re
+from pathlib import Path
 from typing import Literal
 
 from app import settings
 from app.config import CONFIG
 from app.logger import logger
+from app.services.account_discovery import parse_account_id, resolve_session_for_account_id
 from app.services.gemini_wrapper import BridgeGeminiClient
 from app.utils.browser import get_cookie_from_browser
 from gemini_webapi.exceptions import AuthError
+
+_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config.conf"
 
 RefreshResult = Literal["refreshed", "deduped", "failed"]
 # Boot-time outcomes — distinct so the lifespan can log them differently.
@@ -91,13 +96,77 @@ def _resolve_initial_gem_id() -> str | None:
     return None
 
 
+def _resolve_selected_account_id() -> str | None:
+    """The cross-browser selector persisted by `POST /accounts/use`. When set,
+    it overrides `[Cookies].gemini_cookie_*` because the user has explicitly
+    pinned a (browser, /u/N) pair — we re-discover its current cookies on
+    every boot so a rotated SAPISID is picked up automatically.
+
+    Precedence: env > config.conf."""
+    return settings.selected_account_id_env() or CONFIG["Cookies"].get("selected_account_id") or None
+
+
+def persist_selected_account_id(account_id: str | None) -> None:
+    """Write the cross-browser selector to `config.conf` (None clears).
+    Creates `config.conf` if missing so a Docker fresh-install survives the
+    very first `POST /accounts/use`. `chmod 0o600` because the selector reveals
+    which Google account is bound to this bridge."""
+    if account_id is None:
+        CONFIG["Cookies"].pop("selected_account_id", None)
+    else:
+        CONFIG["Cookies"]["selected_account_id"] = account_id
+
+    cfg = configparser.ConfigParser()
+    if _CONFIG_PATH.exists():
+        cfg.read(_CONFIG_PATH, encoding="utf-8")
+    else:
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if "Cookies" not in cfg:
+        cfg["Cookies"] = {}
+    if account_id is None:
+        cfg["Cookies"].pop("selected_account_id", None)
+    else:
+        cfg["Cookies"]["selected_account_id"] = account_id
+
+    tmp = _CONFIG_PATH.with_suffix(_CONFIG_PATH.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        cfg.write(f)
+    tmp.chmod(0o600)
+    tmp.replace(_CONFIG_PATH)
+
+
 async def init_gemini_client() -> InitResult:
     global _gemini_client, _initialization_error, _selected_gem_id
     _initialization_error = None
 
     try:
-        psid, psidts = _resolve_cookies()
         proxy = CONFIG["Proxy"].get("http_proxy") or None
+
+        # `selected_account_id` (e.g. "firefox:1") trumps cached cookies — the
+        # user picked a specific session and we must read it fresh from disk.
+        # Fall back to the legacy precedence only if discovery fails.
+        psid: str | None = None
+        psidts: str | None = None
+        account_index = 0
+        if selected_id := _resolve_selected_account_id():
+            if parse_account_id(selected_id) is None:
+                logger.warning(
+                    f"selected_account_id={selected_id!r} is malformed — "
+                    f"expected `<browser>:<index>` with index in 0..7. Ignored."
+                )
+            else:
+                resolved = resolve_session_for_account_id(selected_id)
+                if resolved:
+                    psid, psidts, account_index = resolved
+                    logger.info(f"Boot using selected_account_id={selected_id!r}")
+                else:
+                    logger.warning(
+                        f"selected_account_id={selected_id!r} no longer resolvable "
+                        f"(browser session gone?) — falling back to cached cookies."
+                    )
+        if not (psid and psidts):
+            psid, psidts = _resolve_cookies()
+            account_index = _resolve_account_index()
 
         if not (psid and psidts):
             _initialization_error = (
@@ -112,7 +181,7 @@ async def init_gemini_client() -> InitResult:
             secure_1psid=psid,
             secure_1psidts=psidts,
             proxy=proxy,
-            account_index=_resolve_account_index(),
+            account_index=account_index,
         )
         await _gemini_client.init()
 
