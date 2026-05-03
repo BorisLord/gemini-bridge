@@ -1,4 +1,3 @@
-import re
 from typing import ClassVar
 
 import httpx
@@ -6,11 +5,18 @@ from app import settings
 from app.guards import extension_only
 from app.logger import logger
 from app.schemas.request import err_response
+from app.services.account_discovery import (
+    discover_accounts,
+    parse_account_id,
+    probe_gemini_account,
+)
 from app.services.gemini_client import (
     get_selected_gem_id,
+    persist_selected_account_id,
     refresh_gemini_client,
     set_selected_gem_id,
 )
+from app.utils.browser import get_all_cookie_pairs
 from litestar import Controller, get, post
 from litestar.exceptions import HTTPException
 from pydantic import BaseModel, Field
@@ -26,44 +32,13 @@ class GemSelection(BaseModel):
 class CookiesPayload(BaseModel):
     cookies: dict[str, str]
     # Chrome supports up to 8 simultaneous Google profiles → /u/0 … /u/7. Mirrors the
-    # range scanned by `_probe_gemini_account` so the API and the probe can't disagree.
+    # range scanned by `probe_gemini_account` so the API and the probe can't disagree.
     account_index: int = Field(default=0, ge=0, le=7)
 
 
 class AccountInfo(BaseModel):
     index: int
     email: str
-
-
-# Modern Gemini Web embeds the user email inside inline JSON as "user@host".
-# A loose `\w+@\w+` only catches `googlers@google.com` (which is filtered out),
-# so we anchor on the quoted form to land on the real account.
-_EMAIL_QUOTED_RX = re.compile(r'"([\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})"')
-
-
-def _is_user_email(email: str) -> bool:
-    if email.endswith("@google.com"):
-        return False
-    if "noreply" in email or "no-reply" in email:
-        return False
-    return not email.endswith("@gemini.google.com")
-
-
-async def _probe_gemini_account(client: httpx.AsyncClient, idx: int) -> str | None:
-    try:
-        r = await client.get(f"https://gemini.google.com/u/{idx}/app", timeout=10.0)
-    except Exception as e:
-        logger.debug(f"Account probe u/{idx} failed: {e}")
-        return None
-    if r.status_code != 200:
-        return None
-    final_path = str(r.url.path)
-    if idx > 0 and (final_path.startswith("/u/0") or final_path == "/app"):
-        return None
-    for email in _EMAIL_QUOTED_RX.findall(r.text[:600000]):
-        if _is_user_email(email):
-            return email
-    return None
 
 
 class RuntimeController(Controller):
@@ -150,7 +125,7 @@ class AuthController(Controller):
         seen: set[str] = set()
         async with httpx.AsyncClient(cookies=cookies, headers=headers, follow_redirects=True) as client:
             for idx in range(8):
-                email = await _probe_gemini_account(client, idx)
+                email = await probe_gemini_account(client, idx)
                 if not email:
                     continue
                 if email in seen:
@@ -158,3 +133,65 @@ class AuthController(Controller):
                 seen.add(email)
                 found.append(AccountInfo(index=idx, email=email))
         return found
+
+
+class DiscoveredAccount(BaseModel):
+    id: str  # stable selector "<browser>:<account_index>" — used by /accounts/use
+    browser: str
+    index: int
+    email: str
+
+
+class AccountSelection(BaseModel):
+    id: str  # must match a DiscoveredAccount.id from GET /accounts
+
+
+class AccountsController(Controller):
+    """Headless cross-browser account flow. Loopback bind is the security
+    boundary — these endpoints intentionally have no extension guard so the
+    bridge stays usable from CLI / scripts without touching the extension."""
+    path = "/accounts"
+    tags: ClassVar = ["accounts"]
+
+    @get(
+        "/",
+        summary="List every Gemini account reachable from any local browser",
+    )
+    async def list_discovered(self) -> list[DiscoveredAccount]:
+        return [DiscoveredAccount(**a) for a in await discover_accounts()]
+
+    @post(
+        "/use",
+        status_code=200,
+        summary="Switch the active Gemini session by discovered account id",
+        responses={
+            400: err_response("Malformed id (expected `<browser>:<account_index>`)."),
+            404: err_response("No matching browser session for the requested id."),
+            502: err_response("Authentication failed for the selected account's cookies."),
+        },
+    )
+    async def use_account(self, data: AccountSelection) -> dict:
+        parsed = parse_account_id(data.id)
+        if parsed is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Malformed id {data.id!r} — expected `<browser>:<account_index>` with index in 0..7",
+            )
+        browser, account_index = parsed
+
+        pairs = get_all_cookie_pairs("gemini")
+        pair = pairs.get(browser)
+        if not pair:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No browser session for {browser!r}. Available: {sorted(pairs)}",
+            )
+        psid, psidts = pair
+        result = await refresh_gemini_client(psid, psidts, account_index=account_index)
+        if result == "failed":
+            raise HTTPException(status_code=502, detail=f"Auth failed for {data.id}")
+        # Persist selection so the choice survives restart — boot will re-discover
+        # this browser's current cookies and skip the legacy fallback chain.
+        persist_selected_account_id(data.id)
+        logger.info(f"Switched active account to {data.id}")
+        return {"status": "ok", "id": data.id, "deduped": result == "deduped"}
