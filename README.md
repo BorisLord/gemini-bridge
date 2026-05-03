@@ -85,6 +85,10 @@ Copy `examples/opencode.jsonc` to `~/.config/opencode/opencode.jsonc` (merge the
 
 ID suffixes: `-plus` = AI Pro, `-advanced` = AI Ultra, none = Free. Trim entries to match your subscription. Same pattern works for any client hitting `/v1/chat/completions`.
 
+### Propose an example for your client
+
+Only `opencode.jsonc` ships verified. If you've wired the bridge into another client (Open WebUI, AnythingLLM, LibreChat, Continue.dev, Cline, Cursor, …) and validated text + streaming + tool-calls if applicable, **please open a PR adding `examples/<client>.<ext>`**. Include a one-line header comment with: client version tested, the field that points to `http://localhost:6969/v1`, and any quirks (dummy API key required, model-discovery toggle, etc.). Open an issue first if you hit something that doesn't work — we'd rather document the gap than ship a broken example.
+
 ## Multi-account
 
 Click the icon → **Detect accounts** — the server probes `/u/0…7` and returns signed-in emails. Pick one; selection persists across restarts. Manual override: `gemini_account_index` under `[Cookies]` in `server/config.conf`.
