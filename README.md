@@ -6,7 +6,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/BorisLord/gemini-bridge?include_prereleases&sort=semver)](https://github.com/BorisLord/gemini-bridge/releases)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Litestar 2.21](https://img.shields.io/badge/litestar-2.21-FFC107.svg)](https://litestar.dev/)
-[![Tests](https://img.shields.io/badge/tests-85_passing-success.svg)](server/tests/)
+[![Tests](https://img.shields.io/badge/tests-122_passing-success.svg)](server/tests/)
 [![GitHub stars](https://img.shields.io/github/stars/BorisLord/gemini-bridge?style=social)](https://github.com/BorisLord/gemini-bridge/stargazers)
 
 Local OpenAI-compatible proxy + Chrome MV3 extension. Any client speaking `/v1/chat/completions` (OpenCode, Cline, Aider, AnythingLLM, Open WebUI, `curl`…) drives **Gemini 3 Pro / Flash / Thinking** through your browser quota — no API key, multi-account ready (`/u/0`, `/u/1`, …), Gems, tool-calls, streaming.
@@ -21,7 +21,7 @@ You're paying for **Gemini AI Pro / Ultra**, but agentic coding clients (OpenCod
 
 ## Install
 
-All paths require a browser signed into `gemini.google.com`. The Chrome MV3 extension covers Chrome / Edge / Brave / Vivaldi / any Chromium fork; Firefox users go through the headless cookie path (`.env` or `[Browser].name` in `config.conf`, see [Headless / no-extension flow](#headless--no-extension-flow)).
+All paths require a browser signed into `gemini.google.com`. The Chrome MV3 extension covers Chrome / Edge / Brave / Vivaldi / any Chromium fork. Firefox / LibreWolf / Safari users skip the extension and pick an account via `POST /accounts/use` — see [Multi-account](#multi-account).
 
 **Native** — Linux or macOS. Windows users need WSL (the bridge no longer ships native Windows DPAPI cookie decryption). Requires `git` + [`uv`](https://docs.astral.sh/uv/getting-started/installation/). [`mise`](https://mise.jdx.dev/) users get `uv`/`ruff`/`pip-audit` pinned via `mise.toml` (`mise install` instead).
 
@@ -91,7 +91,22 @@ Only `opencode.jsonc` ships verified. If you've wired the bridge into another cl
 
 ## Multi-account
 
-Click the icon → **Detect accounts** — the server probes `/u/0…7` and returns signed-in emails. Pick one; selection persists across restarts. Manual override: `gemini_account_index` under `[Cookies]` in `server/config.conf`.
+**Via the extension** — click the icon → **Detect accounts**, pick one. Selection persists across restarts.
+
+**Headless / no-extension** — list every Gemini account reachable from any local browser (Firefox, Chrome, Brave, Edge, Vivaldi, Opera, LibreWolf, Safari…) and switch live without restart:
+
+```bash
+curl -s http://localhost:6969/accounts/        # → [{"id":"firefox:0","browser":"firefox","index":0,"email":"…"}, …]
+curl -s -X POST http://localhost:6969/accounts/use -H 'Content-Type: application/json' -d '{"id":"firefox:1"}'
+```
+
+The selected `id` is persisted to `[Cookies].selected_account_id` in `config.conf` and re-resolved fresh on every boot (so a rotated `__Secure-1PSIDTS` is picked up automatically). Pin from the environment in Docker / CI:
+
+```dotenv
+GEMINI_BRIDGE_SELECTED_ACCOUNT_ID=firefox:1
+```
+
+Manual lower-level override: `gemini_account_index = N` under `[Cookies]` in `server/config.conf` (still works, ignored when `selected_account_id` is set).
 
 ## Gemini Gems
 
@@ -130,7 +145,8 @@ Single source of truth: [`server/src/app/settings.py`](server/src/app/settings.p
 | `GEMINI_BRIDGE_DUMP_PROMPTS` | unset | `1` writes each rendered prompt to `server/logs/prompts/`. Off by default — prompts may carry user secrets. |
 | `GEMINI_BRIDGE_MAX_PROMPT_CHARS` | `100000` | Hard cap on the rendered prompt sent to Gemini Web (silent-abort guardrail). |
 | `GEMINI_COOKIE_1PSID` / `_1PSIDTS` | from config / browser | Headless cookie auth. |
-| `GEMINI_BRIDGE_ACCOUNT_INDEX` | `0` | Multi-account `/u/N` selection. |
+| `GEMINI_BRIDGE_ACCOUNT_INDEX` | `0` | Multi-account `/u/N` selection (lower-level than `SELECTED_ACCOUNT_ID`). |
+| `GEMINI_BRIDGE_SELECTED_ACCOUNT_ID` | unset | Cross-browser pin (`<browser>:<index>`, e.g. `firefox:1`). Trumps `ACCOUNT_INDEX` and any `[Cookies].gemini_cookie_*` — the bridge re-discovers fresh cookies for that browser session at every boot. |
 | `GEMINI_BRIDGE_GEM_ID` | unset | Pre-select a Gem at boot. |
 
 ## HTTP API
@@ -140,6 +156,8 @@ Single source of truth: [`server/src/app/settings.py`](server/src/app/settings.p
 | `POST` | `/v1/chat/completions` | none | OpenAI chat. Streaming + tool calls. |
 | `GET` | `/v1/models` | none | OpenAI model list (drives picker auto-discovery). |
 | `GET` | `/healthz` | none | Health check. |
+| `GET` | `/accounts/` | none | List every Gemini account discoverable across local browsers. |
+| `POST` | `/accounts/use` | none | Switch the active account (`{"id":"<browser>:<index>"}`); persisted across restarts. |
 | `POST` | `/auth/cookies/{provider}` | extension | Push fresh Google cookies. |
 | `POST` | `/auth/accounts/{provider}` | extension | Probe `/u/0…7` for signed-in emails. |
 | `GET` | `/runtime/status` | extension | Bridge state. |
@@ -164,7 +182,7 @@ Caps live in [`settings.TIER_TOOL_RESULT_CAPS`](server/src/app/settings.py) — 
 Gemini Web silently aborts requests where the rendered prompt exceeds **~100 KB** on `gemini-3-pro-advanced` (the limit varies a bit per model and per session — empirically the bridge has logged 94 KB succeeding and 107 KB aborting on the same conversation). The abort surfaces as `APIError: silently aborted by Google`. The bridge therefore caps the rendered prompt at **100 KB** by default. When the cap would be exceeded:
 
 1. Every `role: "system"` message is preserved.
-2. The oldest non-system messages are dropped and replaced by a single placeholder: `[Earlier conversation elided to stay under Gemini Web's ~134 KB context window.]`.
+2. The oldest non-system messages are dropped and replaced by a single placeholder: `[Earlier conversation elided to stay under Gemini Web's silent-abort threshold (~100 KB on gemini-3-pro-advanced).]`.
 3. Iteration stops as soon as the rendered prompt fits.
 
 The full original history stays on the **client side** (OpenCode keeps it locally and resends it on the next turn) — only the wire prompt to Gemini is trimmed.
@@ -175,7 +193,7 @@ Override with `GEMINI_BRIDGE_MAX_PROMPT_CHARS=NNNNN` if you have a different emp
 
 The bridge depends on [`HanaokaYuzu/Gemini-API`](https://github.com/HanaokaYuzu/Gemini-API). Several upstream issues currently block more advanced features and explain why we run **fully stateless** today (no `cid/rid/rcid` reuse, no per-conversation server-side history):
 
-- **[#297](https://github.com/HanaokaYuzu/Gemini-API/issues/297)** — Google removed the `SNlM0e` access token from the Gemini page HTML in April 2026. `gemini-webapi 2.0.0` initialises with `access_token=None`, account reports `UNAUTHENTICATED`. Multi-turn server-side conversations are degraded; advanced models (`gemini-3-pro-advanced`) are unstable. `gemini-3-flash` text-only still works in *guest mode*.
+- **[#297](https://github.com/HanaokaYuzu/Gemini-API/issues/297)** — Google removed the `SNlM0e` access token from the Gemini page HTML in April 2026. `gemini-webapi 2.0.0` initialises with `access_token=None` and `_fetch_user_status` reports `UNAUTHENTICATED` (logged as a warning at boot). **Chat is unaffected**: `StreamGenerate` accepts the cookies as-is and serves every paid model correctly (`gemini-3-pro-advanced`, `-plus`, `gemini-3-flash`, …). What's degraded is the *introspection* path — `client.list_models()` returns a minimal Free-tier-shaped registry, and any feature that wants to enforce account/tier discovery upfront is unreliable. Multi-turn server-side conversations (`ChatSession` reuse) are also broken by this. Treat the warning as benign as long as `/v1/chat/completions` returns valid responses.
 - **[PR #310](https://github.com/HanaokaYuzu/Gemini-API/pull/310)** — `Add Guest mode, periodic activity warmup, and browser client impersonation`. Closes #297 and #239. Includes a `get_access_token` cache-first fix relevant when the bridge forwards a full cookie jar (`__Secure-1PSIDCC` and friends). Currently **OPEN**. Worth installing if/when needed:
   ```bash
   uv pip install 'git+https://github.com/luuquangvu/Gemini-API.git@enable-guest-mode'
@@ -188,7 +206,7 @@ A previous `X-Session-Affinity` / `X-Session-Id` header path (forwarding only th
 
 ## Known limitations
 
-- **Stateless replay**: each request resends the full history (head-tail trimmed under 120 KB). See *Known upstream limitations* for why server-side `cid/rid/rcid` reuse is on hold.
+- **Stateless replay**: each request resends the full history (head-tail trimmed under `MAX_PROMPT_CHARS`, default 100 KB). See *Known upstream limitations* for why server-side `cid/rid/rcid` reuse is on hold.
 - **Synthetic SSE**: `gemini-webapi` returns the full response in one shot; bridge chunks it into SSE frames after. No typewriter effect, but protocol-compliant.
 - **No usage tracking**: `usage` block is always zero (Gemini Web doesn't expose remaining quota).
 - **Tool calling via shim**: Gemini Web has no native function calling, so the bridge prompts the model to emit a structured block and parses it into OpenAI `tool_calls[]`. Works with OpenCode (Read/Edit/Bash/WebFetch).
