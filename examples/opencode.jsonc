@@ -8,15 +8,15 @@
       "name": "Gemini Web",
       "options": { "baseURL": "http://localhost:6969/v1", "apiKey": "dummy" },
       "models": {
-        "gemini-3-pro":                      { "name": "Gemini 3 Pro · Free",                "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash":                    { "name": "Gemini 3 Flash · Free",              "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking":           { "name": "Gemini 3 Flash Thinking · Free",     "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro-plus":                 { "name": "Gemini 3 Pro · AI Pro",              "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-plus":               { "name": "Gemini 3 Flash · AI Pro",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-plus":      { "name": "Gemini 3 Flash Thinking · AI Pro",   "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro-advanced":             { "name": "Gemini 3 Pro · AI Ultra",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-advanced":           { "name": "Gemini 3 Flash · AI Ultra",          "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-advanced":  { "name": "Gemini 3 Flash Thinking · AI Ultra", "limit": { "context": 1000000, "output": 65536 } }
+        "gemini-3-pro-advanced":             { "name": "Ultra · Pro",            "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-advanced":           { "name": "Ultra · Flash",          "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking-advanced":  { "name": "Ultra · Flash Thinking", "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-pro-plus":                 { "name": "Pro · Pro",              "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-plus":               { "name": "Pro · Flash",            "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking-plus":      { "name": "Pro · Flash Thinking",   "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-pro":                      { "name": "Free · Pro",             "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash":                    { "name": "Free · Flash",           "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking":           { "name": "Free · Flash Thinking",  "limit": { "context": 1000000, "output": 65536 } }
       }
     }
   }

@@ -40,7 +40,7 @@ Health check: `curl http://localhost:6969/healthz`.
 | `server/tests/` | stdlib `unittest` suites covering all endpoints, the tool-call shim, env resolvers, and security knobs (CORS / compression / cookie chmod) |
 | `extension/` | Chrome MV3 — `popup.{html,js}`, `background.js`, `providers.js`, `manifest.json` |
 | `extension/icons/icon.svg` | Source of truth — PNG sizes regenerated with `rsvg-convert -w N -h N icon.svg -o iconN.png` |
-| `examples/` | Drop-in client configs (`opencode.jsonc`, `anythingllm.env`, `open-webui.env`) |
+| `examples/` | Drop-in client config (`opencode.jsonc`) |
 
 ## Known pitfalls (not derivable from code)
 
