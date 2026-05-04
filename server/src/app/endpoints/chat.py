@@ -16,7 +16,12 @@ from app.services.gemini_client import (
     get_gemini_client,
     get_selected_gem_id,
 )
-from gemini_webapi.exceptions import AuthError
+from gemini_webapi.exceptions import (
+    AuthError,
+    ModelInvalid,
+    TemporarilyBlocked,
+    UsageLimitExceeded,
+)
 from gemini_webapi.exceptions import TimeoutError as GeminiTimeoutError
 from litestar import Controller, get, post
 from litestar.enums import MediaType
@@ -231,18 +236,27 @@ def _maybe_truncate_tool_result(content: str, cap: int = MAX_TOOL_RESULT_CHARS) 
 
 
 def _map_gemini_error(exc: Exception) -> HTTPException:
-    msg = str(exc).lower()
+    """Typed `gemini_webapi.exceptions` first (reliable), string-scan fallback for
+    cases the lib leaves as a generic `APIError("status: NNN ...")` — the upstream
+    lib doesn't always promote HTTP status codes to typed classes."""
     if isinstance(exc, AuthError):
         return HTTPException(status_code=401, detail=f"Gemini auth failed (cookies expired?): {exc}")
-    if isinstance(exc, GeminiTimeoutError) or "timeout" in msg:
+    if isinstance(exc, GeminiTimeoutError):
         return HTTPException(status_code=504, detail=f"Gemini upstream timed out: {exc}")
-    if any(k in msg for k in ("usage limit", "quota", "rate limit", "too many requests", "exceeded", "status: 429")):
+    if isinstance(exc, UsageLimitExceeded):
         return HTTPException(status_code=429, detail=f"Gemini usage limit reached: {exc}")
+    if isinstance(exc, TemporarilyBlocked):
+        return HTTPException(status_code=429, detail=f"Gemini captcha wall (abuse detection): {exc}")
+    if isinstance(exc, ModelInvalid):
+        return HTTPException(status_code=400, detail=f"Gemini rejected the model: {exc}")
+    msg = str(exc).lower()
     if "status: 401" in msg or "status: 403" in msg:
         return HTTPException(status_code=401, detail=f"Gemini auth refused: {exc}")
     # Captcha/abuse wall: Gemini redirects to /sorry/index (302).
     if "status: 302" in msg or "sorry" in msg:
         return HTTPException(status_code=429, detail=f"Gemini captcha wall (abuse detection): {exc}")
+    if "status: 429" in msg or "quota" in msg or "rate limit" in msg:
+        return HTTPException(status_code=429, detail=f"Gemini usage limit reached: {exc}")
     return HTTPException(status_code=502, detail=f"Gemini upstream error: {exc}")
 
 
