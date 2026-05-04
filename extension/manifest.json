@@ -6,12 +6,19 @@
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [
     "https://*.google.com/*",
-    "http://localhost:6969/*",
-    "http://127.0.0.1:6969/*"
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "background.js",
+    "scripts": ["background.js"],
     "type": "module"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "gemini-bridge@local.dev",
+      "strict_min_version": "115.0"
+    }
   },
   "action": {
     "default_popup": "popup.html",

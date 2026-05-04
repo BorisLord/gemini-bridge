@@ -98,7 +98,7 @@ _COMPRESSION = CompressionConfig(backend="gzip", exclude=[r"^/v1/chat/completion
 # middleware into "allow-all" and bypasses the regex entirely.
 _CORS = CORSConfig(
     allow_origins=[],
-    allow_origin_regex=r"^(chrome-extension://.*|http://(localhost|127\.0\.0\.1)(:\d+)?)$",
+    allow_origin_regex=r"^((chrome|moz)-extension://.*|http://(localhost|127\.0\.0\.1)(:\d+)?)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

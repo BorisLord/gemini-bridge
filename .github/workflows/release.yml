@@ -44,3 +44,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  extension-asset:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Zip extension/
+        run: |
+          zip -r "gemini-bridge-extension-${{ github.event.release.tag_name }}.zip" extension/ \
+            -x "extension/.*" -x "extension/*.env" -x "extension/*.log" -x "extension/.DS_Store"
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "gemini-bridge-extension-${{ github.event.release.tag_name }}.zip" \
+            --repo "${{ github.repository }}" --clobber
