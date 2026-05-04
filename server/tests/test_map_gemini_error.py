@@ -5,19 +5,14 @@ exception class can't silently downgrade a 429 to a 502."""
 import unittest
 
 from app.endpoints.chat import _map_gemini_error
-from gemini_webapi.exceptions import (
-    APIError,
-    AuthError,
-    ModelInvalid,
-    TemporarilyBlocked,
-    UsageLimitExceeded,
-)
+from gemini_webapi.exceptions import APIError, ModelInvalid, TemporarilyBlocked, UsageLimitExceeded
 from gemini_webapi.exceptions import TimeoutError as GeminiTimeoutError
 
 
 class TestMapGeminiErrorTyped(unittest.TestCase):
-    def test_auth_error_to_401(self):
-        self.assertEqual(_map_gemini_error(AuthError("expired")).status_code, 401)
+    # `AuthError` is intentionally absent: the lib raises it only during
+    # `client.init()` / `_1PSIDTS` rotation — never from `generate_content`,
+    # so it never reaches `_map_gemini_error` from the chat path.
 
     def test_timeout_to_504(self):
         self.assertEqual(_map_gemini_error(GeminiTimeoutError("zombie")).status_code, 504)
@@ -55,6 +50,12 @@ class TestMapGeminiErrorStringFallback(unittest.TestCase):
 
     def test_unknown_to_502(self):
         self.assertEqual(_map_gemini_error(APIError("something weird happened")).status_code, 502)
+
+    def test_image_generation_error_to_502(self):
+        # Bridge doesn't expose image gen, but a Gem with image capabilities can
+        # surface this. Falling through to 502 is intentional.
+        from gemini_webapi.exceptions import ImageGenerationError
+        self.assertEqual(_map_gemini_error(ImageGenerationError("nope")).status_code, 502)
 
 
 if __name__ == "__main__":

@@ -134,6 +134,7 @@ Single source of truth: [`server/src/app/settings.py`](server/src/app/settings.p
 | `GEMINI_BRIDGE_DEBUG` | unset | `1` enables verbose logs to console + `/tmp/gemini-bridge-debug.log`. Implies `DUMP_PROMPTS`. |
 | `GEMINI_BRIDGE_DUMP_PROMPTS` | unset | `1` writes each rendered prompt to `server/logs/prompts/`. Off by default — prompts may carry user secrets. |
 | `GEMINI_BRIDGE_MAX_PROMPT_CHARS` | `100000` | Hard cap on the rendered prompt sent to Gemini Web (silent-abort guardrail). |
+| `GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS` | `90` | Request cap forwarded to `gemini-webapi.init(timeout=...)`. Bump for Ultra deep_research / long file analysis. |
 | `GEMINI_COOKIE_1PSID` / `_1PSIDTS` | from config / browser | Headless cookie auth. |
 | `GEMINI_BRIDGE_ACCOUNT_INDEX` | `0` | Multi-account `/u/N` selection. |
 | `GEMINI_BRIDGE_GEM_ID` | unset | Pre-select a Gem at boot. |
