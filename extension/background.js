@@ -1,6 +1,5 @@
-import { PROVIDERS, SERVER_BASE_URL } from "./providers.js";
+import { PROVIDERS, getServerBaseUrl } from "./providers.js";
 
-const SERVER_BASE = `${SERVER_BASE_URL}/auth`;
 const ALARM_NAME = "gemini-bridge-refresh";
 const ALARM_PERIOD_MIN = 5;
 
@@ -38,7 +37,8 @@ async function setSelectedIndex(providerId, idx) {
 
 async function fetchServerStatus() {
   try {
-    const res = await bridgeFetch(`${SERVER_BASE_URL}/runtime/status`);
+    const base = await getServerBaseUrl();
+    const res = await bridgeFetch(`${base}/runtime/status`);
     if (res.ok) {
       return { ...(await res.json()), reachable: true };
     }
@@ -68,7 +68,8 @@ async function pushProvider(provider, reason) {
   }
   const account_index = await getSelectedIndex(provider.id);
   try {
-    const res = await bridgeFetch(`${SERVER_BASE}/cookies/${provider.id}`, {
+    const base = await getServerBaseUrl();
+    const res = await bridgeFetch(`${base}/auth/cookies/${provider.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cookies, account_index }),
@@ -88,7 +89,8 @@ async function discoverAccounts(provider) {
   const cookies = await getCookies(provider);
   if (!cookies) return [];
   try {
-    const res = await bridgeFetch(`${SERVER_BASE}/accounts/${provider.id}`, {
+    const base = await getServerBaseUrl();
+    const res = await bridgeFetch(`${base}/auth/accounts/${provider.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cookies, account_index: 0 }),
@@ -105,8 +107,9 @@ async function discoverAccounts(provider) {
 async function pushAll(reason) {
   const status = await fetchServerStatus();
   if (!status.reachable) {
+    const base = await getServerBaseUrl();
     for (const p of PROVIDERS) {
-      await setStatus(p.id, { ok: false, reason, error: `Server not running at ${SERVER_BASE_URL}` });
+      await setStatus(p.id, { ok: false, reason, error: `Server not running at ${base}` });
     }
     return;
   }
@@ -180,7 +183,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ done: true });
     } else if (msg?.type === "select-gem") {
       try {
-        const res = await bridgeFetch(`${SERVER_BASE_URL}/runtime/gem`, {
+        const base = await getServerBaseUrl();
+        const res = await bridgeFetch(`${base}/runtime/gem`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gem_id: msg.gem_id || null }),

@@ -58,7 +58,12 @@ systemctl --user enable --now gemini-bridge
 loginctl enable-linger $USER   # start without an active login session
 ```
 
-Then in Chrome: `chrome://extensions/` → *Developer mode* → *Load unpacked* → pick `extension/`. Visit `https://gemini.google.com` once, click the extension icon — status should say **✓ Connected**. Quick check: `curl http://localhost:6969/healthz` → `{"status":"ok"}`.
+Then load the extension:
+
+- **Chrome / Edge / Brave / Vivaldi** — `chrome://extensions/` → *Developer mode* → *Load unpacked* → pick `extension/`.
+- **Firefox** (Developer Edition / Nightly / ESR / LibreWolf / Waterfox) — `about:config` → set `xpinstall.signatures.required` to `false` once, then `about:debugging` → *This Firefox* → *Load Temporary Add-on…* → pick `extension/manifest.json`. Firefox Stable is not supported (signature mandatory).
+
+Visit `https://gemini.google.com` once, click the extension icon — status should say **✓ Connected**. Quick check: `curl http://localhost:6969/healthz` → `{"status":"ok"}`.
 
 `__Secure-1PSIDTS` rotates ~daily; the extension auto-pushes new values to the bridge.
 
@@ -79,15 +84,18 @@ Then in Chrome: `chrome://extensions/` → *Developer mode* → *Load unpacked* 
 - Docker: `docker compose logs -f gemini-bridge`.
 - Verbose mode: `GEMINI_BRIDGE_DEBUG=1` adds full request/response dumps.
 
-## Connect to OpenCode
+## Connect a client
 
-Copy `examples/opencode.jsonc` to `~/.config/opencode/opencode.jsonc` (merge the `provider.gemini-web` block if you already have a config), then `/models` → `gemini-web/gemini-3-pro-plus`.
+Any client speaking `/v1/chat/completions` works against `http://localhost:6969/v1`. Drop-in configs ship in [`examples/`](examples/):
 
-ID suffixes: `-plus` = AI Pro, `-advanced` = AI Ultra, none = Free. Trim entries to match your subscription. Same pattern works for any client hitting `/v1/chat/completions`.
+| Client | Config | Note |
+|---|---|---|
+| OpenCode | [`opencode.jsonc`](examples/opencode.jsonc) | merge `provider.gemini-web` into `~/.config/opencode/opencode.jsonc` |
+| Zed | [`zed.jsonc`](examples/zed.jsonc) | merge into `~/.config/zed/settings.json` |
 
-### Propose an example for your client
+Model ID suffixes: `-plus` = AI Pro, `-advanced` = AI Ultra, none = Free. Trim entries to match your subscription.
 
-Only `opencode.jsonc` ships verified. If you've wired the bridge into another client (Open WebUI, AnythingLLM, LibreChat, Continue.dev, Cline, Cursor, …) and validated text + streaming + tool-calls if applicable, **please open a PR adding `examples/<client>.<ext>`**. Include a one-line header comment with: client version tested, the field that points to `http://localhost:6969/v1`, and any quirks (dummy API key required, model-discovery toggle, etc.). Open an issue first if you hit something that doesn't work — we'd rather document the gap than ship a broken example.
+**Got another client working?** Open a PR adding `examples/<client>.<ext>` with a header comment listing the version tested and any quirk (dummy key, env var name, model-discovery toggle). Open an issue first if something breaks — better to document the gap than ship a broken example.
 
 ## Multi-account
 
@@ -144,6 +152,7 @@ Single source of truth: [`server/src/app/settings.py`](server/src/app/settings.p
 | `GEMINI_BRIDGE_DEBUG` | unset | `1` enables verbose logs to console + `/tmp/gemini-bridge-debug.log`. Implies `DUMP_PROMPTS`. |
 | `GEMINI_BRIDGE_DUMP_PROMPTS` | unset | `1` writes each rendered prompt to `server/logs/prompts/`. Off by default — prompts may carry user secrets. |
 | `GEMINI_BRIDGE_MAX_PROMPT_CHARS` | `100000` | Hard cap on the rendered prompt sent to Gemini Web (silent-abort guardrail). |
+| `GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS` | `90` | Request cap forwarded to `gemini-webapi.init(timeout=...)`. Bump for Ultra deep_research / long file analysis. |
 | `GEMINI_COOKIE_1PSID` / `_1PSIDTS` | from config / browser | Headless cookie auth. |
 | `GEMINI_BRIDGE_ACCOUNT_INDEX` | `0` | Multi-account `/u/N` selection (lower-level than `SELECTED_ACCOUNT_ID`). |
 | `GEMINI_BRIDGE_SELECTED_ACCOUNT_ID` | unset | Cross-browser pin (`<browser>:<index>`, e.g. `firefox:1`). Trumps `ACCOUNT_INDEX` and any `[Cookies].gemini_cookie_*` — the bridge re-discovers fresh cookies for that browser session at every boot. |

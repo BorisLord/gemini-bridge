@@ -52,6 +52,7 @@ Health check: `curl http://localhost:6969/healthz`.
 - **Chrome device-bound cookies** (2025+) — cookies extracted from Chrome flagged as detached → silent abort on Pro models. Firefox capture is the workaround.
 - **Synthetic SSE** — `gemini-webapi` returns the full response in one shot; the bridge then chunks it into SSE frames.
 - **Tool-calling via regex shim** — Gemini Web has no native function calling. The bridge injects a custom system prompt asking Gemini to emit `<<TOOL_CALL>>{...}<<END>>`, then parses it back into OpenAI `tool_calls[]`.
+- **Request timeout deferred to lib** — `BridgeGeminiClient.init` forwards `settings.REQUEST_TIMEOUT_SECONDS` to `gemini-webapi`'s `init(timeout=...)`. Do not re-wrap `client.generate_content` in `asyncio.wait_for` — it would double-time the request and lose the lib's zombie-stream retry. Override via `GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS=N`.
 
 ## Working rules
 

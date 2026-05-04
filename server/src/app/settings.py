@@ -23,6 +23,16 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _optional(name: str) -> str | None:
     v = os.environ.get(name)
     return v.strip() if v and v.strip() else None
@@ -37,8 +47,9 @@ DUMP_PROMPTS: bool = DEBUG or _bool("GEMINI_BRIDGE_DUMP_PROMPTS")
 MAX_PROMPT_CHARS: int = _int("GEMINI_BRIDGE_MAX_PROMPT_CHARS", 100_000)
 
 PROMPT_DUMP_RETAIN: int = 30  # last.txt is always kept on top of those.
-# 90s: gemini-webapi's retry decorator can stretch a doomed call to 60-120s otherwise.
-REQUEST_TIMEOUT_SECONDS: float = 90.0
+# Passed to gemini-webapi `init(timeout=...)` — caps streaming + polling lib-side.
+# Bump for Ultra users running deep_research / large file analysis.
+REQUEST_TIMEOUT_SECONDS: float = _float("GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS", 90.0)
 # Per-tier char budgets per tool result (free 32k tok, Pro/Ultra 1M tok).
 TIER_TOOL_RESULT_CAPS: dict[str, int] = {"free": 8_000, "plus": 32_000, "advanced": 128_000}
 
