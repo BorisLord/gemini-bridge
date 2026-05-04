@@ -31,10 +31,11 @@ Health check: `curl http://localhost:6969/healthz`.
 | `server/src/run.py` | Entrypoint script: arg parsing, cookie probe, boot banner, `uvicorn.Server.run()` |
 | `server/src/app/main.py` | Litestar bootstrap, lifespan, CORS, OpenAI-shape exception handlers, `/docs` toggle |
 | `server/src/app/endpoints/chat.py` | `/v1/chat/completions`, `/v1/models`, prompt building, tool-call shim |
-| `server/src/app/endpoints/auth.py` | `/auth/cookies/{provider}`, `/auth/accounts/{provider}`, `/runtime/status`, `/runtime/gem` |
-| `server/src/app/services/gemini_client.py` | Public service surface: module-level globals `_gemini_client` + `_selected_gem_id`, `init/refresh_gemini_client`, env/config resolvers |
+| `server/src/app/endpoints/auth.py` | `/auth/cookies/{provider}`, `/auth/accounts/{provider}`, `/runtime/status`, `/runtime/gem`, `/accounts` (list), `/accounts/use` (switch + persist) |
+| `server/src/app/services/gemini_client.py` | Public service surface: module-level globals `_gemini_client` + `_selected_gem_id`, `init/refresh_gemini_client`, env/config resolvers, `persist_selected_account_id` |
 | `server/src/app/services/gemini_wrapper.py` | `BridgeGeminiClient` — wraps `gemini_webapi.GeminiClient` with account routing + cookie persistence |
-| `server/src/app/utils/browser.py` | Linux/macOS fallback that reads Gemini cookies via `browser_cookie3` (Firefox-family or any Chromium-family browser per `[Browser].name`) |
+| `server/src/app/services/account_discovery.py` | Cross-browser Gemini account harvest: `discover_accounts()` returns `[{id:"<browser>:<idx>", browser, index, email}]` by combining browser cookies + `/u/0..7` probes. Powers `AccountsController` and the boot-time `selected_account_id` resolver. |
+| `server/src/app/utils/browser.py` | Local-browser cookie fallback delegating to `gemini_webapi.utils.load_browser_cookies` (chrome, chromium, opera, brave, edge, vivaldi, firefox, librewolf, safari). `[Browser].name` is honored as a *preference*; `get_all_cookie_pairs` returns every browser session for the multi-account flow. |
 | `server/src/app/settings.py` | Centralised env-var reading. Add new `GEMINI_BRIDGE_*` knobs here, not inline. |
 | `server/src/app/schemas/request.py` | `OpenAIChatRequest` + typed `ChatMessage` Pydantic models for `/v1/chat/completions` |
 | `server/tests/` | stdlib `unittest` suites covering all endpoints, the tool-call shim, env resolvers, and security knobs (CORS / compression / cookie chmod) |
@@ -46,6 +47,7 @@ Health check: `curl http://localhost:6969/healthz`.
 
 - **Single-worker uvicorn is mandatory** — `_gemini_client` and `_selected_gem_id` are module-level globals in `services/gemini_client.py`. Multi-worker yields disjoint clients.
 - **Stateless mode** — `ChatSession` is avoided entirely until upstream `gemini-webapi` releases PR #296 (`DEFAULT_METADATA.copy()`) and resolves issue #297 (missing `SNlM0e` token). Each request rebuilds the full prompt.
+- **`UNAUTHENTICATED` warning at boot is benign** — `gemini-webapi`'s `_fetch_user_status` logs `Account status: UNAUTHENTICATED` because Google's `GET_USER_STATUS` RPC requires a `Authorization: SAPISIDHASH` header the lib doesn't compute. `StreamGenerate` (chat) accepts plain cookies and serves every model correctly regardless. The only thing that's degraded is `client.list_models()` / `client._model_registry` — they fall back to a minimal Free-tier shape. Don't build features that *enforce* tier-based decisions on this registry; use it for diagnostics only.
 - **Silent abort at ~100 KB** — Gemini Web drops prompts above ~100 KB silently (varies per model). Reason for `_trim_messages_to_fit()` + cap `settings.MAX_PROMPT_CHARS=100_000`. Override with env `GEMINI_BRIDGE_MAX_PROMPT_CHARS=N`.
 - **Chrome device-bound cookies** (2025+) — cookies extracted from Chrome flagged as detached → silent abort on Pro models. Firefox capture is the workaround.
 - **Synthetic SSE** — `gemini-webapi` returns the full response in one shot; the bridge then chunks it into SSE frames.

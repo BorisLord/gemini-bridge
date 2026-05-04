@@ -98,7 +98,7 @@ class TestRuntimeOriginChecks(unittest.TestCase):
 
 class TestAccountIndexValidation(unittest.TestCase):
     """Bounds locked at 0..7 to mirror Chrome's max simultaneous Google profiles
-    and `_probe_gemini_account`'s scan range. Out-of-range values must 422.
+    and `probe_gemini_account`'s scan range. Out-of-range values must 422.
 
     `refresh_gemini_client` is mocked so validation tests don't make real
     network calls or persist cookies to the real `server/config.conf`."""

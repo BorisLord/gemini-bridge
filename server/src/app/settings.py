@@ -84,3 +84,11 @@ def account_index_env() -> int | None:
 
 def initial_gem_id_env() -> str | None:
     return _optional("GEMINI_BRIDGE_GEM_ID")
+
+
+def selected_account_id_env() -> str | None:
+    """Cross-browser selector (`<browser>:<account_index>`, e.g. `firefox:1`)
+    consumed by `_resolve_selected_account_id` at boot. Higher precedence than
+    the same key in `[Cookies]` of `config.conf` so a Docker/CI run can pin
+    its session purely from the environment."""
+    return _optional("GEMINI_BRIDGE_SELECTED_ACCOUNT_ID")
