@@ -84,15 +84,18 @@ Visit `https://gemini.google.com` once, click the extension icon — status shou
 - Docker: `docker compose logs -f gemini-bridge`.
 - Verbose mode: `GEMINI_BRIDGE_DEBUG=1` adds full request/response dumps.
 
-## Connect to OpenCode
+## Connect a client
 
-Copy `examples/opencode.jsonc` to `~/.config/opencode/opencode.jsonc` (merge the `provider.gemini-web` block if you already have a config), then `/models` → `gemini-web/gemini-3-pro-plus`.
+Any client speaking `/v1/chat/completions` works against `http://localhost:6969/v1`. Drop-in configs ship in [`examples/`](examples/):
 
-ID suffixes: `-plus` = AI Pro, `-advanced` = AI Ultra, none = Free. Trim entries to match your subscription. Same pattern works for any client hitting `/v1/chat/completions`.
+| Client | Config | Note |
+|---|---|---|
+| OpenCode | [`opencode.jsonc`](examples/opencode.jsonc) | merge `provider.gemini-web` into `~/.config/opencode/opencode.jsonc` |
+| Zed | [`zed.jsonc`](examples/zed.jsonc) | merge into `~/.config/zed/settings.json` |
 
-### Propose an example for your client
+Model ID suffixes: `-plus` = AI Pro, `-advanced` = AI Ultra, none = Free. Trim entries to match your subscription.
 
-Only `opencode.jsonc` ships verified. If you've wired the bridge into another client (Open WebUI, AnythingLLM, LibreChat, Continue.dev, Cline, Cursor, …) and validated text + streaming + tool-calls if applicable, **please open a PR adding `examples/<client>.<ext>`**. Include a one-line header comment with: client version tested, the field that points to `http://localhost:6969/v1`, and any quirks (dummy API key required, model-discovery toggle, etc.). Open an issue first if you hit something that doesn't work — we'd rather document the gap than ship a broken example.
+**Got another client working?** Open a PR adding `examples/<client>.<ext>` with a header comment listing the version tested and any quirk (dummy key, env var name, model-discovery toggle). Open an issue first if something breaks — better to document the gap than ship a broken example.
 
 ## Multi-account
 

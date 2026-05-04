@@ -1,0 +1,26 @@
+// Zed — drop this `language_models.openai_compatible` block into ~/.config/zed/settings.json.
+// Suffix → Google subscription needed: none = Free, `-plus` = AI Pro, `-advanced` = AI Ultra.
+// Calling a tier you don't pay for silently downgrades.
+//
+// Required env: export GEMINI_BRIDGE_API_KEY=dummy   (the bridge ignores the value, but Zed must
+// see a non-empty env var matching the provider name in upper-snake-case + `_API_KEY`).
+{
+  "language_models": {
+    "openai_compatible": {
+      "Gemini Bridge": {
+        "api_url": "http://localhost:6969/v1",
+        "available_models": [
+          { "name": "gemini-3-pro-advanced",            "display_name": "Ultra · Pro",            "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-flash-advanced",          "display_name": "Ultra · Flash",          "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-flash-thinking-advanced", "display_name": "Ultra · Flash Thinking", "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-pro-plus",                "display_name": "Pro · Pro",              "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-flash-plus",              "display_name": "Pro · Flash",            "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-flash-thinking-plus",     "display_name": "Pro · Flash Thinking",   "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-pro",                     "display_name": "Free · Pro",             "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-flash",                   "display_name": "Free · Flash",           "max_tokens": 1000000, "max_output_tokens": 65536 },
+          { "name": "gemini-3-flash-thinking",          "display_name": "Free · Flash Thinking",  "max_tokens": 1000000, "max_output_tokens": 65536 }
+        ]
+      }
+    }
+  }
+}
