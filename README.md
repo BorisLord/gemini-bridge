@@ -58,7 +58,12 @@ systemctl --user enable --now gemini-bridge
 loginctl enable-linger $USER   # start without an active login session
 ```
 
-Then in Chrome: `chrome://extensions/` → *Developer mode* → *Load unpacked* → pick `extension/`. Visit `https://gemini.google.com` once, click the extension icon — status should say **✓ Connected**. Quick check: `curl http://localhost:6969/healthz` → `{"status":"ok"}`.
+Then load the extension:
+
+- **Chrome / Edge / Brave / Vivaldi** — `chrome://extensions/` → *Developer mode* → *Load unpacked* → pick `extension/`.
+- **Firefox** (Developer Edition / Nightly / ESR / LibreWolf / Waterfox) — `about:config` → set `xpinstall.signatures.required` to `false` once, then `about:debugging` → *This Firefox* → *Load Temporary Add-on…* → pick `extension/manifest.json`. Firefox Stable is not supported (signature mandatory).
+
+Visit `https://gemini.google.com` once, click the extension icon — status should say **✓ Connected**. Quick check: `curl http://localhost:6969/healthz` → `{"status":"ok"}`.
 
 `__Secure-1PSIDTS` rotates ~daily; the extension auto-pushes new values to the bridge.
 
