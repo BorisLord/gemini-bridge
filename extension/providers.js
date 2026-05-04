@@ -1,4 +1,10 @@
-export const SERVER_BASE_URL = "http://localhost:6969";
+export const DEFAULT_SERVER_BASE_URL = "http://localhost:6969";
+
+export async function getServerBaseUrl() {
+  const { serverBaseUrl } = await chrome.storage.local.get("serverBaseUrl");
+  const trimmed = (serverBaseUrl || "").trim().replace(/\/+$/, "");
+  return trimmed || DEFAULT_SERVER_BASE_URL;
+}
 
 export const PROVIDERS = [
   {

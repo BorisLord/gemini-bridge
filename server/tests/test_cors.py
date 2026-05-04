@@ -19,9 +19,10 @@ class TestCORSConfig(unittest.TestCase):
         # is echoed back — full inbound CSRF surface.
         self.assertFalse(self.cors.is_allow_all_origins)
 
-    def test_regex_accepts_chrome_extension_and_loopback(self):
+    def test_regex_accepts_browser_extensions_and_loopback(self):
         for origin in (
             "chrome-extension://abcdefghijklmnop",
+            "moz-extension://12345678-1234-1234-1234-123456789abc",
             "http://localhost:6969",
             "http://localhost",
             "http://127.0.0.1",
@@ -36,7 +37,7 @@ class TestCORSConfig(unittest.TestCase):
             "http://evil.com",
             "https://localhost",
             "http://localhost.evil.com",
-            "moz-extension://abc",
+            "safari-web-extension://abc",
             "null",
             "",
         ):
