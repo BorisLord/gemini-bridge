@@ -5,6 +5,7 @@ import configparser
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+from app import settings
 from app.logger import logger
 from gemini_webapi import GeminiClient as WebGeminiClient
 
@@ -48,7 +49,9 @@ class BridgeGeminiClient:
                 self.client.cookies = extras  # setter; sets domain=.google.com
 
     async def init(self) -> None:
-        await self.client.init()
+        # Push the bridge's request cap into the lib so its watchdog enforces it
+        # (and we benefit from the lib's zombie-stream retry below the cap).
+        await self.client.init(timeout=settings.REQUEST_TIMEOUT_SECONDS)
         if self.account_index > 0:
             self._install_account_router()
         await self._persist_cookies()

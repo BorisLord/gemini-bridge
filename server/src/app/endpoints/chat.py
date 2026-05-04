@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 import json
 import re
@@ -16,12 +15,7 @@ from app.services.gemini_client import (
     get_gemini_client,
     get_selected_gem_id,
 )
-from gemini_webapi.exceptions import (
-    AuthError,
-    ModelInvalid,
-    TemporarilyBlocked,
-    UsageLimitExceeded,
-)
+from gemini_webapi.exceptions import ModelInvalid, TemporarilyBlocked, UsageLimitExceeded
 from gemini_webapi.exceptions import TimeoutError as GeminiTimeoutError
 from litestar import Controller, get, post
 from litestar.enums import MediaType
@@ -239,8 +233,6 @@ def _map_gemini_error(exc: Exception) -> HTTPException:
     """Typed `gemini_webapi.exceptions` first (reliable), string-scan fallback for
     cases the lib leaves as a generic `APIError("status: NNN ...")` — the upstream
     lib doesn't always promote HTTP status codes to typed classes."""
-    if isinstance(exc, AuthError):
-        return HTTPException(status_code=401, detail=f"Gemini auth failed (cookies expired?): {exc}")
     if isinstance(exc, GeminiTimeoutError):
         return HTTPException(status_code=504, detail=f"Gemini upstream timed out: {exc}")
     if isinstance(exc, UsageLimitExceeded):
@@ -558,18 +550,12 @@ class ChatController(Controller):
               tools_count=(len(data.tools) if data.tools else 0))
 
         try:
-            response = await asyncio.wait_for(
-                client.generate_content(
-                    message=final_prompt,
-                    model=data.model,
-                    files=None,
-                    gem=get_selected_gem_id(),
-                ),
-                timeout=settings.REQUEST_TIMEOUT_SECONDS,
+            response = await client.generate_content(
+                message=final_prompt,
+                model=data.model,
+                files=None,
+                gem=get_selected_gem_id(),
             )
-        except asyncio.TimeoutError as to_e:
-            e = GeminiTimeoutError(f"Gemini request exceeded {settings.REQUEST_TIMEOUT_SECONDS}s (bridge-side cutoff)")
-            raise _map_gemini_error(e) from to_e
         except Exception as e:
             mapped = _map_gemini_error(e)
             _dlog("GEMINI.ERR", req=req_id, err_type=type(e).__name__, err=_truncate(str(e), 500))
