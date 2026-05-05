@@ -25,8 +25,8 @@ FROM python:3.13-slim
 WORKDIR /app/server
 COPY --from=builder /app/server/.venv /app/server/.venv
 COPY server/src ./src
-COPY server/pyproject.toml server/config.conf.example ./
-RUN cp config.conf.example /opt/config.conf.default
+COPY server/pyproject.toml server/config.ini.example ./
+RUN cp config.ini.example /opt/config.ini.default
 
 ENV PATH="/app/server/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -41,13 +41,13 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 COPY <<'EOF' /entrypoint.sh
 #!/bin/sh
 set -e
-# Persist config.conf in /data (named volume); app expects it under /app/server.
+# Persist config.ini in /data (named volume); app expects it under /app/server.
 mkdir -p /data
-if [ ! -f /data/config.conf ]; then
-  cp /opt/config.conf.default /data/config.conf
+if [ ! -f /data/config.ini ]; then
+  cp /opt/config.ini.default /data/config.ini
 fi
-chmod 0600 /data/config.conf
-ln -sf /data/config.conf /app/server/config.conf
+chmod 0600 /data/config.ini
+ln -sf /data/config.ini /app/server/config.ini
 cd /app/server
 exec python src/run.py --host 0.0.0.0 --port "${GEMINI_BRIDGE_PORT:-6969}" "$@"
 EOF
