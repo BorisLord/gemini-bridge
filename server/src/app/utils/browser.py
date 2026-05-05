@@ -1,10 +1,7 @@
-"""Local-browser cookie fallback. Reached only when the extension isn't loaded
-and `GEMINI_COOKIE_*` / `config.conf` are empty. Delegates browser discovery
-to `gemini_webapi.utils.load_browser_cookies` which queries every supported
-browser in parallel (chrome, chromium, opera, opera_gx, brave, edge, vivaldi,
-firefox, librewolf, safari) and silently skips ones that fail / aren't
-installed. `[Browser].name` in `config.conf` is honored as a *preference*:
-when set and present in the result, that browser's cookies win the tie."""
+"""Local-browser cookie reader. Delegates to `gemini_webapi.utils.load_browser_cookies`
+(chrome, chromium, opera, opera_gx, brave, edge, vivaldi, firefox, librewolf,
+safari — silently skips unavailable ones). `[Browser].name` in `config.ini`
+is honored as a tie-break preference for the single-pair path."""
 from typing import Literal
 
 from app.config import CONFIG
@@ -23,12 +20,9 @@ def _extract_pair(cookies: list[dict]) -> tuple[str, str] | None:
 
 
 def get_all_cookie_pairs(service: Literal["gemini"]) -> dict[str, tuple[str, str]]:
-    """Returns every browser that has a complete `(__Secure-1PSID, __Secure-1PSIDTS)`
-    pair for `google.com`, as `{browser_name: (psid, psidts)}`.
-
-    Foundation for the multi-account discovery flow: each browser session is a
-    distinct Google login, and within each session `/u/N/` indexes the accounts
-    chained on that login. Caller iterates this dict and probes per-session."""
+    """Returns `{browser_name: (psid, psidts)}` for every browser with a
+    complete cookie pair on `google.com`. Each entry is a distinct Google
+    login; `/u/N/` then indexes the accounts chained inside that login."""
     if service != "gemini":
         logger.warning(f"Unsupported service: {service}")
         return {}
@@ -46,14 +40,8 @@ def get_all_cookie_pairs(service: Literal["gemini"]) -> dict[str, tuple[str, str
 
 
 def get_cookie_from_browser(service: Literal["gemini"]) -> tuple[str, str] | None:
-    """Returns `(__Secure-1PSID, __Secure-1PSIDTS)` from the first browser that
-    has both. The preferred browser (`[Browser].name`) is tried first; on miss
-    we walk every other browser the lib found cookies in. Returns None only if
-    no browser has a complete pair.
-
-    Used at boot when the bridge needs *one* session to start serving without
-    config — see `get_all_cookie_pairs` for the discovery path that surfaces
-    every available session."""
+    """Single-pair lookup: preferred browser first (`[Browser].name`), else any
+    available. Returns None if no browser holds a complete pair."""
     if service != "gemini":
         logger.warning(f"Unsupported service: {service}")
         return None
