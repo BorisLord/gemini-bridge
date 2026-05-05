@@ -9,15 +9,11 @@ from typing import Any, ClassVar
 
 from app import settings
 from app.logger import logger
-from app.schemas.request import OpenAIChatRequest, err_response
-from app.services.gemini_client import (
-    GeminiClientNotInitializedError,
-    get_gemini_client,
-    get_selected_gem_id,
-)
+from app.schemas.openai_chat import OpenAIChatRequest, err_response
+from app.services.account_registry import Account, AccountRegistry
 from gemini_webapi.exceptions import ModelInvalid, TemporarilyBlocked, UsageLimitExceeded
 from gemini_webapi.exceptions import TimeoutError as GeminiTimeoutError
-from litestar import Controller, get, post
+from litestar import Controller, Request, get, post
 from litestar.enums import MediaType
 from litestar.exceptions import HTTPException
 from litestar.response import Response, ServerSentEvent
@@ -42,7 +38,6 @@ def _sanitize_arg_string(s: str) -> str:
         # Identical halves (Gemini's typical `[https://x](https://x)`): collapse.
         if text == target:
             return target
-        # Otherwise keep the target if it looks like a URL or path, else the label.
         if target.startswith(("http://", "https://", "/", "./", "../")) or "/" in target:
             return target
         return text
@@ -123,12 +118,12 @@ def _build_tools_system_prompt(tools: list[dict]) -> str:
 
 
 def _extract_tool_calls(text: str, tool_names: set[str]) -> list[dict]:
-    """Parse <<TOOL_CALL>>...<<END>> blocks. Tolerant to missing <<END>> (Gemini sometimes
-    forgets it). Falls back to legacy [tool_call:name for args] text format if needed."""
+    """Parse <<TOOL_CALL>>...<<END>> blocks; falls back to the legacy
+    `[tool_call:name for args]` text format. `raw_decode` stops at the end of
+    the first valid JSON object, so a missing trailing <<END>> (Gemini sometimes
+    forgets it) is naturally tolerated."""
     out = []
 
-    # raw_decode stops at the end of the first valid JSON object, so a missing
-    # trailing <<END>> is naturally ignored.
     markers = [m.start() for m in re.finditer(r"<<TOOL_CALL>>", text)]
     for i, start in enumerate(markers):
         end_pos = markers[i + 1] if i + 1 < len(markers) else len(text)
@@ -325,6 +320,49 @@ def _is_gemini_model(name: str) -> bool:
     return name.startswith("gemini-")
 
 
+def _split_model_routing(model: str) -> tuple[str, str | None]:
+    """Strip a `@<account_id>` suffix from a model name. Returns (clean_model,
+    account_id_or_None). Account ids contain a `:` (e.g. `firefox:0`), so we
+    only treat the part after the LAST `@` as a routing token if it matches."""
+    if "@" not in model:
+        return model, None
+    clean, _, account = model.rpartition("@")
+    account = account.strip()
+    # Reject obvious non-routing suffixes (no colon = not a stable id format).
+    if ":" not in account:
+        return model, None
+    return clean.strip(), account
+
+
+def _resolve_account(request: Request, model: str) -> tuple[str, Account]:
+    """Explicit routing only: header > `model@<id>` suffix. No bare-model fallback
+    so quotas can never be charged to the wrong Google account by accident.
+    Returns (clean_model, account). 400 if no routing, 404 if id unknown."""
+    reg: AccountRegistry = request.app.state.account_registry
+    header = request.headers.get("X-Bridge-Account")
+    if header and header.strip():
+        account_id = header.strip()
+        clean = model
+    else:
+        clean, account_id = _split_model_routing(model)
+    if account_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Routing required. Pass `X-Bridge-Account: <id>` header or "
+                f"use `<model>@<id>` (e.g. `{model}@firefox:0`). "
+                f"Available accounts: {sorted(a.id for a in reg.list()) or '(empty)'}."
+            ),
+        )
+    account = reg.get(account_id)
+    if account is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown account_id {account_id!r}. Available: {sorted(a.id for a in reg.list())}",
+        )
+    return clean, account
+
+
 # Mirrors `gemini_webapi.constants` — feeds /v1/models for client auto-discovery.
 GEMINI_MODEL_IDS = [
     "gemini-3-pro",
@@ -363,7 +401,6 @@ def _trim_messages_to_fit(messages: list, tools: list | None, cap: int, max_char
         rendered, _, _ = _build_prompt_from_messages(trimmed, tools, cap)
         if len(rendered) <= max_chars:
             return trimmed, len(rest) - keep_n
-    # Last resort: keep only system + placeholder + the very last message.
     trimmed = [*system_msgs, placeholder, *rest[-1:]]
     return trimmed, len(rest) - 1
 
@@ -418,20 +455,23 @@ class ChatController(Controller):
     tags: ClassVar = ["chat"]
 
     @get("/models", summary="List Gemini models exposed via the bridge")
-    async def list_models(self) -> dict:
+    async def list_models(self, request: Request) -> dict:
+        """Suffixed variants only (`<model>@<id>`) — bare names would 400 on chat."""
         now = int(time.time())
-        items = [{"id": m, "object": "model", "created": now, "owned_by": "gemini-bridge"}
-                 for m in GEMINI_MODEL_IDS]
+        reg: AccountRegistry = request.app.state.account_registry
+        items: list[dict] = [
+            {"id": f"{m}@{a.id}", "object": "model", "created": now, "owned_by": "gemini-bridge"}
+            for m in GEMINI_MODEL_IDS
+            for a in reg.list()
+        ]
         return {"object": "list", "data": items}
 
     @post(
         "/chat/completions",
         status_code=200,
         summary="OpenAI-compatible chat completion (SSE if stream=true)",
-        # Default to SSE so `ServerSentEvent.media_type` isn't overridden by the
-        # route-level default (Litestar's `to_asgi_response()` passes the route's
-        # media_type into the response, which wins over the response object's own).
-        # Non-stream replies explicitly wrap their dict in a JSON `Response`.
+        # SSE default: Litestar's `to_asgi_response()` route media_type wins over
+        # the response object's own. Non-stream replies override via JSON `Response`.
         media_type="text/event-stream",
         responses={
             400: err_response("Missing/invalid messages, model field, or non-Gemini model."),
@@ -440,7 +480,9 @@ class ChatController(Controller):
             503: err_response("Bridge not initialized — push cookies via /auth/cookies/gemini."),
         },
     )
-    async def chat_completions(self, data: OpenAIChatRequest) -> Response | ServerSentEvent:
+    async def chat_completions(
+        self, data: OpenAIChatRequest, request: Request,
+    ) -> Response | ServerSentEvent:
         is_stream = data.stream if data.stream is not None else False
 
         if not data.messages:
@@ -448,8 +490,10 @@ class ChatController(Controller):
         if not data.model:
             raise HTTPException(status_code=400, detail="Model not specified in the request.")
 
+        clean_model, account = _resolve_account(request, data.model)
+
         req_id = uuid.uuid4().hex[:8]
-        _dlog("REQ.HEAD", req=req_id, model=data.model, stream=is_stream,
+        _dlog("REQ.HEAD", req=req_id, account_id=account.id, model=clean_model, stream=is_stream,
               msgs=len(data.messages),
               tools=(len(data.tools) if data.tools else 0),
               tool_choice=str(data.tool_choice) if data.tool_choice else None)
@@ -464,16 +508,24 @@ class ChatController(Controller):
             ) if getattr(data, f, None) is not None
         ]
         if _ignored_fields:
-            logger.info(f"[REQ.IGNORED] req={req_id} | dropped (no Gemini Web equivalent): {_ignored_fields}")
+            logger.info(
+                f"[REQ.IGNORED] req={req_id} account_id={account.id} | "
+                f"dropped (no Gemini Web equivalent): {_ignored_fields}"
+            )
 
-        if not _is_gemini_model(data.model):
-            raise HTTPException(status_code=400, detail=f"Model '{data.model}' is not a Gemini model.")
+        if not _is_gemini_model(clean_model):
+            raise HTTPException(status_code=400, detail=f"Model '{clean_model}' is not a Gemini model.")
 
-        # Lookup AFTER input validation so a bad model still gets a 400, not 503.
+        # The lib's @running decorator transparently re-inits later if auto_close fires.
+        reg: AccountRegistry = request.app.state.account_registry
         try:
-            client = get_gemini_client()
-        except GeminiClientNotInitializedError as e:
-            raise HTTPException(status_code=503, detail=str(e)) from e
+            client = await reg.get_or_init_client(account.id)
+        except Exception as e:
+            logger.error(f"[registry] init failed for account_id={account.id!r}: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to initialize Gemini client for account_id={account.id}: {e}",
+            ) from e
 
         if data.tools and settings.DEBUG:
             for i, t in enumerate(data.tools[:3]):
@@ -483,8 +535,7 @@ class ChatController(Controller):
                       desc_excerpt=_truncate(fn.get("description", ""), 200),
                       params_keys=list((fn.get("parameters", {}) or {}).get("properties", {}).keys())[:8])
 
-        # Internal helpers expect plain dicts (back-compat with the previous
-        # `messages: List[dict]` schema). Convert once at the boundary.
+        # Internal helpers expect plain dicts; convert once at the boundary.
         messages_data = [m.model_dump(exclude_none=True) for m in data.messages]
 
         if settings.DEBUG:
@@ -498,7 +549,7 @@ class ChatController(Controller):
                       content_len=(len(content) if isinstance(content, str) else None),
                       content_excerpt=_truncate(content if isinstance(content, str) else json.dumps(content), 600))
 
-        cap = _cap_for_model(data.model)
+        cap = _cap_for_model(clean_model)
 
         final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
             messages_data, data.tools, cap,
@@ -551,19 +602,24 @@ class ChatController(Controller):
 
         try:
             response = await client.generate_content(
-                message=final_prompt,
-                model=data.model,
+                final_prompt,
+                model=clean_model,
                 files=None,
-                gem=get_selected_gem_id(),
+                gem=account.selected_gem_id,
             )
         except Exception as e:
             mapped = _map_gemini_error(e)
-            _dlog("GEMINI.ERR", req=req_id, err_type=type(e).__name__, err=_truncate(str(e), 500))
-            logger.error(f"Error in /v1/chat/completions endpoint: {e}", exc_info=True)
+            _dlog("GEMINI.ERR", req=req_id, account_id=account.id,
+                  err_type=type(e).__name__, err=_truncate(str(e), 500))
+            logger.error(
+                f"Error in /v1/chat/completions endpoint (account_id={account.id}): {e}",
+                exc_info=True,
+            )
             raise mapped from e
 
         raw_text = response.text or ""
-        _dlog("GEMINI.OK", req=req_id, latency_s=round(time.time() - t0, 2), resp_chars=len(raw_text))
+        _dlog("GEMINI.OK", req=req_id, account_id=account.id,
+              latency_s=round(time.time() - t0, 2), resp_chars=len(raw_text))
         _dlog("GEMINI.BODY", _verbose=True, req=req_id, resp_full=_truncate(raw_text, 2500))
 
         tool_names: set[str] = set()
@@ -580,13 +636,14 @@ class ChatController(Controller):
               fallback_used=bool(tool_calls and not _TOOL_CALL_RE.search(raw_text)))
 
         if is_stream:
-            _dlog("RESP.STREAM", req=req_id, mode="sse", with_tool_calls=bool(tool_calls))
-            # ServerSentEvent wraps each yielded payload as `data: …\n\n` and
-            # auto-sets Cache-Control / Connection / X-Accel-Buffering headers.
+            _dlog("RESP.STREAM", req=req_id, account_id=account.id,
+                  mode="sse", with_tool_calls=bool(tool_calls))
+            # Echo `data.model` (suffixed) — OpenCode pickers compare the response model.
             return ServerSentEvent(
                 stream_openai_format(final_text, data.model, tool_calls or None),
             )
-        _dlog("RESP.JSON", req=req_id, mode="json", with_tool_calls=bool(tool_calls))
+        _dlog("RESP.JSON", req=req_id, account_id=account.id,
+              mode="json", with_tool_calls=bool(tool_calls))
         return Response(
             content=convert_to_openai_format(final_text, data.model, tool_calls or None),
             media_type=MediaType.JSON,
