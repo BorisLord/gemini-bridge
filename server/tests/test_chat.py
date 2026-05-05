@@ -1,7 +1,7 @@
 import json
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
 
+from _helpers import install_registry, seeded_registry
 from app.main import app
 from litestar.testing import TestClient
 
@@ -12,34 +12,47 @@ class TestChatCompletions(unittest.TestCase):
         cls.client = TestClient(app)
 
     def test_happy_path_returns_openai_shape(self):
-        fake_resp = MagicMock()
-        fake_resp.text = "Hello from Gemini"
-        fake_client = MagicMock()
-        fake_client.generate_content = AsyncMock(return_value=fake_resp)
-        with patch("app.endpoints.chat.get_gemini_client", return_value=fake_client):
+        with install_registry(seeded_registry(response_text="Hello from Gemini")):
             r = self.client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "gemini-3-pro-plus",
+                    "model": "gemini-3-pro-plus@firefox:0",
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
         self.assertEqual(r.status_code, 200)
         body = r.json()
-        self.assertEqual(body["model"], "gemini-3-pro-plus")
+        # Server echoes back the routed model name as sent (suffix preserved).
+        self.assertEqual(body["model"], "gemini-3-pro-plus@firefox:0")
         self.assertEqual(body["object"], "chat.completion")
         self.assertEqual(body["choices"][0]["finish_reason"], "stop")
         self.assertEqual(body["choices"][0]["message"]["content"], "Hello from Gemini")
 
     def test_non_gemini_model_rejected(self):
-        r = self.client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "qwen/qwen3-coder:free",
-                "messages": [{"role": "user", "content": "hi"}],
-            },
-        )
+        # Even with a healthy registry + explicit routing, non-Gemini model ids
+        # must 400 before we call the upstream lib.
+        with install_registry(seeded_registry()):
+            r = self.client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "qwen/qwen3-coder:free@firefox:0",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
         self.assertEqual(r.status_code, 400)
+
+    def test_bare_model_without_routing_returns_400(self):
+        # Routing is mandatory: no header + no `@<id>` suffix → 400.
+        with install_registry(seeded_registry()):
+            r = self.client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gemini-3-pro",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Routing required", r.json()["error"]["message"])
 
 
 def _parse_sse(payload: str) -> list[str]:
@@ -61,16 +74,12 @@ class TestChatCompletionsStreaming(unittest.TestCase):
         cls.client = TestClient(app)
 
     def _post_stream(self, body: dict, resp_text: str = "Hello stream"):
-        fake_resp = MagicMock()
-        fake_resp.text = resp_text
-        fake_client = MagicMock()
-        fake_client.generate_content = AsyncMock(return_value=fake_resp)
-        with patch("app.endpoints.chat.get_gemini_client", return_value=fake_client):
+        with install_registry(seeded_registry(response_text=resp_text)):
             return self.client.post("/v1/chat/completions", json=body)
 
     def test_stream_returns_event_stream_content_type(self):
         r = self._post_stream({
-            "model": "gemini-3-flash",
+            "model": "gemini-3-flash@firefox:0",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         })
@@ -79,7 +88,7 @@ class TestChatCompletionsStreaming(unittest.TestCase):
 
     def test_stream_emits_done_sentinel_last(self):
         r = self._post_stream({
-            "model": "gemini-3-flash",
+            "model": "gemini-3-flash@firefox:0",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         })
@@ -89,7 +98,7 @@ class TestChatCompletionsStreaming(unittest.TestCase):
 
     def test_stream_chunks_match_openai_shape(self):
         r = self._post_stream({
-            "model": "gemini-3-flash",
+            "model": "gemini-3-flash@firefox:0",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         }, resp_text="ABC")
@@ -97,7 +106,8 @@ class TestChatCompletionsStreaming(unittest.TestCase):
         self.assertGreater(len(chunks), 0)
         for c in chunks:
             self.assertEqual(c["object"], "chat.completion.chunk")
-            self.assertEqual(c["model"], "gemini-3-flash")
+            # Echoed model keeps the routing suffix as the client sent it.
+            self.assertEqual(c["model"], "gemini-3-flash@firefox:0")
             self.assertEqual(c["choices"][0]["index"], 0)
         self.assertEqual(chunks[0]["choices"][0]["delta"].get("role"), "assistant")
         self.assertTrue(any(c["choices"][0]["delta"].get("content") == "ABC" for c in chunks))
@@ -107,7 +117,7 @@ class TestChatCompletionsStreaming(unittest.TestCase):
         # Gemini emits a delimited <<TOOL_CALL>> block; bridge re-emits as OpenAI tool_calls.
         tool_text = '<<TOOL_CALL>>\n{"name": "bash", "arguments": {"command": "ls"}}\n<<END>>'
         r = self._post_stream({
-            "model": "gemini-3-flash",
+            "model": "gemini-3-flash@firefox:0",
             "messages": [{"role": "user", "content": "run ls"}],
             "stream": True,
             "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],

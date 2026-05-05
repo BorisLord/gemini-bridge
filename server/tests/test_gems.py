@@ -1,50 +1,51 @@
-"""Auto-detect was dropped (Google's LIST_GEMS RPC is unreliable); user pastes
-URL or bare ID directly."""
-import os
-import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+"""Per-account Gem selection.
 
+Each `Account` carries its own `selected_gem_id` (RAM-only). `/runtime/gem`
+writes to the account named by `account_id` in the body — there is no
+default account fallback, the field is mandatory.
+
+Auto-detect was dropped (Google's LIST_GEMS RPC is unreliable); user pastes
+URL or bare ID directly."""
+import unittest
+
+from _helpers import install_registry, seeded_registry
 from app.main import app
-from app.services import gemini_client as gc
+from app.services.bootstrap import parse_gem_id
 from litestar.testing import TestClient
 
 CHROME_ORIGIN = "chrome-extension://abcdefghijklmnop"
 
 
-class TestGemUrlParsing(unittest.TestCase):
-    def setUp(self):
-        gc._selected_gem_id = None
-
+class TestParseGemId(unittest.TestCase):
     def test_bare_id_kept_as_is(self):
-        gc.set_selected_gem_id("0eb07ff2fcd3")
-        self.assertEqual(gc.get_selected_gem_id(), "0eb07ff2fcd3")
+        self.assertEqual(parse_gem_id("0eb07ff2fcd3"), "0eb07ff2fcd3")
 
     def test_full_url_u0_extracts_id(self):
-        gc.set_selected_gem_id("https://gemini.google.com/u/0/gem/eb0eb9162487")
-        self.assertEqual(gc.get_selected_gem_id(), "eb0eb9162487")
+        self.assertEqual(
+            parse_gem_id("https://gemini.google.com/u/0/gem/eb0eb9162487"),
+            "eb0eb9162487",
+        )
 
     def test_full_url_u1_extracts_id(self):
-        gc.set_selected_gem_id("https://gemini.google.com/u/1/gem/0eb07ff2fcd3")
-        self.assertEqual(gc.get_selected_gem_id(), "0eb07ff2fcd3")
+        self.assertEqual(
+            parse_gem_id("https://gemini.google.com/u/1/gem/0eb07ff2fcd3"),
+            "0eb07ff2fcd3",
+        )
 
-    def test_url_with_trailing_slash_or_query(self):
-        gc.set_selected_gem_id("https://gemini.google.com/u/0/gem/abc-123_xyz?foo=bar")
-        self.assertEqual(gc.get_selected_gem_id(), "abc-123_xyz")
+    def test_url_with_trailing_query_keeps_id_only(self):
+        self.assertEqual(
+            parse_gem_id("https://gemini.google.com/u/0/gem/abc-123_xyz?foo=bar"),
+            "abc-123_xyz",
+        )
 
-    def test_empty_clears(self):
-        gc.set_selected_gem_id("something")
-        gc.set_selected_gem_id("")
-        self.assertIsNone(gc.get_selected_gem_id())
+    def test_empty_returns_none(self):
+        self.assertIsNone(parse_gem_id(""))
 
-    def test_none_clears(self):
-        gc.set_selected_gem_id("something")
-        gc.set_selected_gem_id(None)
-        self.assertIsNone(gc.get_selected_gem_id())
+    def test_none_returns_none(self):
+        self.assertIsNone(parse_gem_id(None))
 
-    def test_whitespace_only_clears(self):
-        gc.set_selected_gem_id("something")
-        gc.set_selected_gem_id("   ")
-        self.assertIsNone(gc.get_selected_gem_id())
+    def test_whitespace_only_returns_none(self):
+        self.assertIsNone(parse_gem_id("   "))
 
 
 class TestSelectGemEndpoint(unittest.TestCase):
@@ -52,118 +53,144 @@ class TestSelectGemEndpoint(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TestClient(app)
 
-    def setUp(self):
-        gc._selected_gem_id = None
-
-    def test_post_bare_id(self):
-        r = self.client.post(
-            "/runtime/gem",
-            headers={"Origin": CHROME_ORIGIN},
-            json={"gem_id": "abc-123"},
-        )
+    def test_post_with_account_id_writes_to_that_account(self):
+        reg = seeded_registry()
+        with install_registry(reg):
+            r = self.client.post(
+                "/runtime/gem",
+                headers={"Origin": CHROME_ORIGIN},
+                json={"gem_id": "abc-123", "account_id": "firefox:0"},
+            )
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["selected_id"], "abc-123")
+        body = r.json()
+        self.assertEqual(body["selected_id"], "abc-123")
+        self.assertEqual(body["account_id"], "firefox:0")
+        self.assertEqual(reg.get("firefox:0").selected_gem_id, "abc-123")
 
     def test_post_full_url_extracts_id(self):
-        r = self.client.post(
-            "/runtime/gem",
-            headers={"Origin": CHROME_ORIGIN},
-            json={"gem_id": "https://gemini.google.com/u/1/gem/0eb07ff2fcd3"},
-        )
+        with install_registry(seeded_registry()):
+            r = self.client.post(
+                "/runtime/gem",
+                headers={"Origin": CHROME_ORIGIN},
+                json={
+                    "gem_id": "https://gemini.google.com/u/1/gem/0eb07ff2fcd3",
+                    "account_id": "firefox:0",
+                },
+            )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["selected_id"], "0eb07ff2fcd3")
 
     def test_post_empty_clears(self):
-        gc.set_selected_gem_id("xyz")
-        r = self.client.post(
-            "/runtime/gem",
-            headers={"Origin": CHROME_ORIGIN},
-            json={"gem_id": ""},
-        )
+        reg = seeded_registry()
+        reg.get("firefox:0").selected_gem_id = "xyz"
+        with install_registry(reg):
+            r = self.client.post(
+                "/runtime/gem",
+                headers={"Origin": CHROME_ORIGIN},
+                json={"gem_id": "", "account_id": "firefox:0"},
+            )
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(r.json()["selected_id"])
+        self.assertIsNone(reg.get("firefox:0").selected_gem_id)
 
-    def test_status_reflects_selection(self):
-        self.client.post(
-            "/runtime/gem",
-            headers={"Origin": CHROME_ORIGIN},
-            json={"gem_id": "https://gemini.google.com/u/0/gem/eb0eb9162487"},
-        )
-        r = self.client.get("/runtime/status", headers={"Origin": CHROME_ORIGIN})
+    def test_post_scopes_to_named_account_only(self):
+        reg = seeded_registry(account_count=2)
+        with install_registry(reg):
+            r = self.client.post(
+                "/runtime/gem",
+                headers={"Origin": CHROME_ORIGIN},
+                json={"gem_id": "scoped-gem", "account_id": "firefox:1"},
+            )
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["gem"]["selected_id"], "eb0eb9162487")
+        self.assertEqual(r.json()["account_id"], "firefox:1")
+        self.assertEqual(reg.get("firefox:1").selected_gem_id, "scoped-gem")
+        # Sibling account untouched.
+        self.assertIsNone(reg.get("firefox:0").selected_gem_id)
+
+    def test_post_unknown_account_id_returns_404(self):
+        with install_registry(seeded_registry()):
+            r = self.client.post(
+                "/runtime/gem",
+                headers={"Origin": CHROME_ORIGIN},
+                json={"gem_id": "x", "account_id": "nope:99"},
+            )
+        self.assertEqual(r.status_code, 404)
+
+    def test_post_missing_account_id_returns_422(self):
+        # No fallback to a default — Pydantic rejects the body.
+        with install_registry(seeded_registry()):
+            r = self.client.post(
+                "/runtime/gem",
+                headers={"Origin": CHROME_ORIGIN},
+                json={"gem_id": "x"},
+            )
+        self.assertEqual(r.status_code, 422)
+
+    def test_status_reflects_per_account_selection(self):
+        reg = seeded_registry(account_count=2)
+        with install_registry(reg):
+            self.client.post(
+                "/runtime/gem",
+                headers={"Origin": CHROME_ORIGIN},
+                json={"gem_id": "https://gemini.google.com/u/0/gem/eb0eb9162487",
+                      "account_id": "firefox:0"},
+            )
+            r = self.client.get("/runtime/status", headers={"Origin": CHROME_ORIGIN})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        accounts = {a["id"]: a for a in body["accounts"]}
+        self.assertEqual(accounts["firefox:0"]["selected_gem_id"], "eb0eb9162487")
+        self.assertIsNone(accounts["firefox:1"]["selected_gem_id"])
 
 
 class TestGemPropagatesToChatCompletions(unittest.TestCase):
-    """Selected Gem ID must reach generate_content()."""
+    """Selected Gem ID on the resolved account must reach `generate_content()`."""
 
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
 
-    def setUp(self):
-        gc._selected_gem_id = None
-
-    def tearDown(self):
-        gc._gemini_client = None
-        gc._selected_gem_id = None
-
     def test_no_gem_passes_none(self):
-        fake_response = MagicMock()
-        fake_response.text = "ok"
-        fake = MagicMock()
-        fake.generate_content = AsyncMock(return_value=fake_response)
-        gc._gemini_client = fake
-
-        r = self.client.post("/v1/chat/completions", json={
-            "model": "gemini-3-flash",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
+        reg = seeded_registry()
+        with install_registry(reg):
+            r = self.client.post("/v1/chat/completions", json={
+                "model": "gemini-3-flash@firefox:0",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
         self.assertEqual(r.status_code, 200)
-        kwargs = fake.generate_content.call_args.kwargs
+        kwargs = reg.get("firefox:0").client.generate_content.call_args.kwargs
         self.assertIsNone(kwargs.get("gem"))
 
     def test_selected_gem_is_forwarded(self):
-        fake_response = MagicMock()
-        fake_response.text = "ok"
-        fake = MagicMock()
-        fake.generate_content = AsyncMock(return_value=fake_response)
-        gc._gemini_client = fake
-        gc.set_selected_gem_id("my-gem-xyz")
-
-        r = self.client.post("/v1/chat/completions", json={
-            "model": "gemini-3-flash",
-            "messages": [{"role": "user", "content": "hi"}],
-        })
+        reg = seeded_registry()
+        reg.get("firefox:0").selected_gem_id = "my-gem-xyz"
+        with install_registry(reg):
+            r = self.client.post("/v1/chat/completions", json={
+                "model": "gemini-3-flash@firefox:0",
+                "messages": [{"role": "user", "content": "hi"}],
+            })
         self.assertEqual(r.status_code, 200)
-        kwargs = fake.generate_content.call_args.kwargs
+        kwargs = reg.get("firefox:0").client.generate_content.call_args.kwargs
         self.assertEqual(kwargs.get("gem"), "my-gem-xyz")
 
-
-class TestGemEnvBoot(unittest.TestCase):
-    """GEMINI_BRIDGE_GEM_ID pre-selects a Gem at boot (headless mode)."""
-
-    def setUp(self):
-        gc._selected_gem_id = None
-        os.environ.pop("GEMINI_BRIDGE_GEM_ID", None)
-
-    def tearDown(self):
-        os.environ.pop("GEMINI_BRIDGE_GEM_ID", None)
-        gc._selected_gem_id = None
-
-    @patch.object(gc.BridgeGeminiClient, "init", new_callable=AsyncMock)
-    def test_env_gem_id_applied_at_init(self, _mock_init):
-        os.environ["GEMINI_COOKIE_1PSID"] = "fake-psid"
-        os.environ["GEMINI_COOKIE_1PSIDTS"] = "fake-psidts"
-        os.environ["GEMINI_BRIDGE_GEM_ID"] = "boot-gem-from-env"
-        try:
-            import asyncio
-            ok = asyncio.run(gc.init_gemini_client())
-            self.assertTrue(ok)
-            self.assertEqual(gc.get_selected_gem_id(), "boot-gem-from-env")
-        finally:
-            for k in ("GEMINI_COOKIE_1PSID", "GEMINI_COOKIE_1PSIDTS"):
-                os.environ.pop(k, None)
+    def test_gem_scoped_to_routed_account(self):
+        # Multi-account routing: a request scoped to firefox:1 must use that
+        # account's Gem, not any other's.
+        reg = seeded_registry(account_count=2)
+        reg.get("firefox:0").selected_gem_id = "wrong-gem"
+        reg.get("firefox:1").selected_gem_id = "right-gem"
+        with install_registry(reg):
+            r = self.client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gemini-3-flash@firefox:1",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        self.assertEqual(r.status_code, 200)
+        kwargs = reg.get("firefox:1").client.generate_content.call_args.kwargs
+        self.assertEqual(kwargs.get("gem"), "right-gem")
+        reg.get("firefox:0").client.generate_content.assert_not_awaited()
 
 
 if __name__ == "__main__":
