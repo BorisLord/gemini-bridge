@@ -1,5 +1,11 @@
-// Suffix → Google subscription needed: none = Free, `-plus` = AI Pro, `-advanced` = AI Ultra.
+// Suffix mapping: `-advanced` = AI Ultra, `-plus` = AI Pro, none = Free.
 // Calling a tier you don't pay for silently downgrades.
+//
+// Routing is MANDATORY: every model name MUST carry an `@<account_id>` suffix
+// — bare names get rejected with 400. List your registered accounts with
+// `curl http://localhost:6969/accounts/`. Replace `firefox:0` below with the
+// id(s) you actually have. Duplicate per account to expose multi-account
+// quotas in the picker.
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
@@ -8,15 +14,21 @@
       "name": "Gemini Web",
       "options": { "baseURL": "http://localhost:6969/v1", "apiKey": "dummy" },
       "models": {
-        "gemini-3-pro-advanced":             { "name": "Ultra · Pro",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-advanced":           { "name": "Ultra · Flash",          "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-advanced":  { "name": "Ultra · Flash Thinking", "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro-plus":                 { "name": "Pro · Pro",              "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-plus":               { "name": "Pro · Flash",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-plus":      { "name": "Pro · Flash Thinking",   "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro":                      { "name": "Free · Pro",             "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash":                    { "name": "Free · Flash",           "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking":           { "name": "Free · Flash Thinking",  "limit": { "context": 1000000, "output": 65536 } }
+        "gemini-3-pro-advanced@firefox:0":            { "name": "Ultra · Pro",            "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-advanced@firefox:0":          { "name": "Ultra · Flash",          "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking-advanced@firefox:0": { "name": "Ultra · Flash Thinking", "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-pro-plus@firefox:0":                { "name": "Pro · Pro",              "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-plus@firefox:0":              { "name": "Pro · Flash",            "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking-plus@firefox:0":     { "name": "Pro · Flash Thinking",   "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-pro@firefox:0":                     { "name": "Free · Pro",             "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash@firefox:0":                   { "name": "Free · Flash",           "limit": { "context": 1000000, "output": 65536 } },
+        "gemini-3-flash-thinking@firefox:0":          { "name": "Free · Flash Thinking",  "limit": { "context": 1000000, "output": 65536 } }
+
+        // ── Add a second account by duplicating any line above and changing
+        //    both the `@<id>` suffix and the display name. Leading-comma style:
+        //    just remove the `// ` prefix, no other edit.
+        // ,"gemini-3-pro-plus@extension:0":           { "name": "Pro · Pro · Chrome",     "limit": { "context": 1000000, "output": 65536 } }
+        // ,"gemini-3-pro-plus@firefox:1":             { "name": "Pro · Pro · Firefox #2", "limit": { "context": 1000000, "output": 65536 } }
       }
     }
   }
