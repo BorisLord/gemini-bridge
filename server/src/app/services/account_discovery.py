@@ -1,16 +1,9 @@
 """Cross-browser, cross-`/u/N/` Gemini account discovery.
 
-Workflow:
-  1. `get_all_cookie_pairs()` returns every browser session that has a complete
-     `(__Secure-1PSID, __Secure-1PSIDTS)` pair on `google.com`.
-  2. For each session, probe `/u/0..7/app` and parse the email out of the
-     inline JSON Gemini Web embeds (mirrors `_probe_gemini_account` in
-     `endpoints.auth`).
-  3. Aggregate into a flat list with stable IDs `<browser>:<account_index>`
-     so callers can select a specific account regardless of which browser
-     session it lives in.
-
-Foundation for the headless multi-account UX (no extension required)."""
+For every browser session with a complete `(__Secure-1PSID, __Secure-1PSIDTS)`
+pair, probe `/u/0..7/app` and scrape the embedded email. Returned ids are
+stable across runs as `<browser>:<account_index>` — the routing key the rest
+of the bridge uses."""
 import asyncio
 import re
 
@@ -67,11 +60,9 @@ def _is_user_email(email: str) -> bool:
 
 
 async def probe_gemini_account(client: httpx.AsyncClient, idx: int) -> str | None:
-    """Returns the user email for `/u/{idx}/app` or None if the slot is empty
-    or Google redirected to /u/0 (= unused slot). Single shared implementation
-    used by both `discover_accounts` (auto-discovery) and `/auth/accounts/{provider}`
-    (extension push). Keeping it in one place prevents the two callers from
-    drifting apart on the email regex / redirect heuristic."""
+    """Returns the user email for `/u/{idx}/app`, or None if the slot is empty
+    (Google redirects unused slots to /u/0). Shared by `discover_accounts` and
+    `/auth/accounts/{provider}`."""
     try:
         r = await client.get(f"https://{GEMINI_HOST}/u/{idx}/app", timeout=10.0)
     except Exception as e:
@@ -121,11 +112,9 @@ async def _discover_browser(browser: str, psid: str, psidts: str) -> list[dict]:
 
 
 async def discover_accounts() -> list[dict]:
-    """Returns every Gemini account reachable from any local browser as
-    `[{id, browser, index, email}]`. Probes browsers in parallel — each
-    browser's /u/N/ scan is sequential (Google rate-limits these probes
-    per-session). One browser failing (locked profile, network error) is
-    logged and skipped so the others still surface."""
+    """Returns `[{id, browser, index, email}]` for every reachable account.
+    Browsers in parallel, /u/N scan sequential per browser (Google rate-limits
+    per-session). Per-browser failures are logged and skipped."""
     pairs = get_all_cookie_pairs("gemini")
     if not pairs:
         return []
