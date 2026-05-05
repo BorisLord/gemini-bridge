@@ -39,7 +39,19 @@ async function renderServer(status) {
   $.innerHTML = `<div>Server reachable · Gemini active <span class="sub">at ${esc(base)}</span></div>`;
 }
 
-function renderGem(status) {
+// A Gem belongs to ONE Google account (the one it was created on). The popup
+// therefore scopes the section to whichever extension:<idx> is currently
+// selected in the Gemini picker — switching the picker re-renders this with
+// that account's own selected_gem_id.
+function _activeExtensionAccount(status, selections, accountsByProvider) {
+  const idx = selections?.["gemini"] ?? 0;
+  const id = `extension:${idx}`;
+  const acct = (status?.accounts || []).find((a) => a.id === id);
+  const known = (accountsByProvider?.["gemini"] || []).find((a) => a.index === idx);
+  return { id, idx, gemId: acct?.selected_gem_id || "", email: acct?.email || known?.email || null };
+}
+
+function renderGem(status, selections, accountsByProvider) {
   const headerCb = document.getElementById("gem-enabled");
   const $ = document.getElementById("gem");
   $.replaceChildren();
@@ -49,20 +61,23 @@ function renderGem(status) {
     $.classList.add("hidden");
     return;
   }
+  const active = _activeExtensionAccount(status, selections, accountsByProvider);
   headerCb.disabled = false;
-  const selected = (status.gem && status.gem.selected_id) || "";
-  // Section is "on" if a Gem ID is currently applied. User checks the box to
-  // reveal the input; unchecking clears the active Gem server-side.
-  const enabled = !!selected;
+  const enabled = !!active.gemId;
   headerCb.checked = enabled;
   $.classList.toggle("hidden", !enabled);
   if (!enabled) return;
+
+  const scope = document.createElement("div");
+  scope.className = "sub";
+  scope.textContent = `Scope: u/${active.idx}${active.email ? " — " + active.email : ""}`;
+  $.appendChild(scope);
 
   const current = document.createElement("div");
   current.className = "sub ok";
   current.textContent = "Active Gem ID: ";
   const code = document.createElement("code");
-  code.textContent = selected;
+  code.textContent = active.gemId;
   current.appendChild(code);
   $.appendChild(current);
 
@@ -74,6 +89,7 @@ function renderGem(status) {
   input.placeholder = "Paste Gem URL or ID to switch";
   const apply = document.createElement("button");
   apply.id = "gem-apply";
+  apply.dataset.accountId = active.id;
   apply.textContent = "Apply";
   row.appendChild(input);
   row.appendChild(apply);
@@ -89,18 +105,24 @@ function renderGem(status) {
   hint.appendChild(a);
   hint.append(
     " and paste the URL — e.g. https://gemini.google.com/u/0/gem/abc123. " +
-    "The Gem must exist on the Google account currently selected above.",
+    "The Gem must exist on the Google account selected in the picker below.",
   );
   $.appendChild(hint);
 }
 
-async function applyGemFromInput() {
+async function _resolveActiveAccountId() {
+  const { selections = {} } = await chrome.storage.local.get("selections");
+  return `extension:${selections["gemini"] ?? 0}`;
+}
+
+async function applyGemFromInput(accountId) {
   const raw = (document.getElementById("gem-input")?.value || "").trim();
-  await chrome.runtime.sendMessage({ type: "select-gem", gem_id: raw });
+  const target = accountId || (await _resolveActiveAccountId());
+  await chrome.runtime.sendMessage({ type: "select-gem", gem_id: raw, account_id: target });
   setTimeout(render, 200);
 }
 
-function renderGemPrompt() {
+function renderGemPrompt(accountId) {
   // Shown when the user toggles Gem ON but no Gem is active yet.
   // Bind directly here — render() doesn't re-run after a toggle click, so the
   // global gem-apply binding wouldn't catch this button.
@@ -115,8 +137,9 @@ function renderGemPrompt() {
   input.placeholder = "Paste Gem URL or ID";
   const apply = document.createElement("button");
   apply.id = "gem-apply";
+  apply.dataset.accountId = accountId;
   apply.textContent = "Apply";
-  apply.addEventListener("click", applyGemFromInput);
+  apply.addEventListener("click", () => applyGemFromInput(accountId));
   row.appendChild(input);
   row.appendChild(apply);
   $.appendChild(row);
@@ -125,14 +148,18 @@ function renderGemPrompt() {
 async function render() {
   const status = await fetchStatus();
   await renderServer(status);
-  renderGem(status);
+  const { statuses, accounts, selections } = await loadState();
+  renderGem(status, selections, accounts);
 
-  document.getElementById("gem-apply")?.addEventListener("click", applyGemFromInput);
+  // The active account id may shift if the picker changes — re-resolve at click
+  // time rather than capturing the stale value rendered above.
+  document.getElementById("gem-apply")?.addEventListener("click", (e) => {
+    applyGemFromInput(e.currentTarget.dataset.accountId);
+  });
 
   const $ = document.getElementById("providers");
   $.replaceChildren();
   if (!status || !status.reachable) return;
-  const { statuses, accounts, selections } = await loadState();
   for (const p of PROVIDERS) {
     const s = statuses[p.id];
     const accts = accounts[p.id] || [];
@@ -239,10 +266,11 @@ document.getElementById("sync").addEventListener("click", async () => {
 });
 
 document.getElementById("gem-enabled").addEventListener("change", async (e) => {
+  const accountId = await _resolveActiveAccountId();
   if (e.target.checked) {
-    renderGemPrompt();
+    renderGemPrompt(accountId);
   } else {
-    await chrome.runtime.sendMessage({ type: "select-gem", gem_id: "" });
+    await chrome.runtime.sendMessage({ type: "select-gem", gem_id: "", account_id: accountId });
     setTimeout(render, 200);
   }
 });

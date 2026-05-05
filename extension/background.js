@@ -60,6 +60,15 @@ async function setAccounts(providerId, accounts) {
   await chrome.storage.local.set({ accounts: acctMap });
 }
 
+async function getKnownEmail(providerId, account_index) {
+  // Forward the email cached by `discover-accounts` so `/accounts/` shows it
+  // without a re-probe (which would fail on Chrome device-bound cookies).
+  const { accounts: acctMap = {} } = await chrome.storage.local.get("accounts");
+  const list = acctMap[providerId] || [];
+  const match = list.find((a) => a.index === account_index);
+  return match ? match.email : null;
+}
+
 async function pushProvider(provider, reason) {
   const cookies = await getCookies(provider);
   if (!cookies) {
@@ -67,12 +76,13 @@ async function pushProvider(provider, reason) {
     return;
   }
   const account_index = await getSelectedIndex(provider.id);
+  const email = await getKnownEmail(provider.id, account_index);
   try {
     const base = await getServerBaseUrl();
     const res = await bridgeFetch(`${base}/auth/cookies/${provider.id}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cookies, account_index }),
+      body: JSON.stringify({ cookies, account_index, email }),
     });
     if (!res.ok) {
       const text = await res.text();
@@ -182,12 +192,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (provider) await pushProvider(provider, "account-selected");
       sendResponse({ done: true });
     } else if (msg?.type === "select-gem") {
+      // A Gem belongs to ONE Google account — the server tracks `selected_gem_id`
+      // per account and refuses the request without `account_id`. The popup
+      // resolves the active extension account from its picker and forwards it.
       try {
         const base = await getServerBaseUrl();
         const res = await bridgeFetch(`${base}/runtime/gem`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ gem_id: msg.gem_id || null }),
+          body: JSON.stringify({ gem_id: msg.gem_id || null, account_id: msg.account_id }),
         });
         const body = await res.json().catch(() => ({}));
         sendResponse({ ok: res.ok, status: res.status, body });
