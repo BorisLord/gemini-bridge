@@ -6,12 +6,14 @@ browser_cookie3 backends or hit gemini.google.com."""
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from _helpers import install_registry, seeded_registry
 from app.main import app
 from app.services.account_discovery import (
     discover_accounts,
     parse_account_id,
     resolve_session_for_account_id,
 )
+from app.services.account_registry import AccountRegistry
 from litestar.testing import TestClient
 
 
@@ -141,55 +143,56 @@ class TestDiscoverAccounts(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAccountsEndpoints(unittest.TestCase):
-    """`AccountsController` glues the service to HTTP. Mock the service, not
-    the underlying browser/httpx — this layer is just routing + persistence."""
+    """`AccountsController` is a thin read/write layer over the registry. We
+    install a registry per test instead of mocking browser cookies — the chat
+    + auth flows are exercised end-to-end against the real registry code."""
 
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
 
-    def test_list_returns_discovered_accounts(self):
-        sample = [{"id": "firefox:0", "browser": "firefox", "index": 0, "email": "a@x.com"}]
-        with patch("app.endpoints.auth.discover_accounts", new=AsyncMock(return_value=sample)):
+    def test_list_returns_registered_accounts(self):
+        with install_registry(seeded_registry(account_count=2)):
             r = self.client.get("/accounts/")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), sample)
+        body = r.json()
+        ids = {a["id"] for a in body}
+        self.assertEqual(ids, {"firefox:0", "firefox:1"})
+        # No `is_default` field — the concept was removed (routing is always
+        # explicit per request).
+        for a in body:
+            self.assertNotIn("is_default", a)
 
-    def test_use_account_switches_and_persists(self):
-        with patch("app.endpoints.auth.get_all_cookie_pairs",
-                   return_value={"firefox": ("psid-x", "psidts-x")}), \
-             patch("app.endpoints.auth.refresh_gemini_client",
-                   new=AsyncMock(return_value="refreshed")) as refresh_mock, \
-             patch("app.endpoints.auth.persist_selected_account_id") as persist_mock:
-            r = self.client.post("/accounts/use", json={"id": "firefox:0"})
+    def test_list_empty_registry_returns_empty_list(self):
+        with install_registry(AccountRegistry()):
+            r = self.client.get("/accounts/")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), {"status": "ok", "id": "firefox:0", "deduped": False})
-        refresh_mock.assert_awaited_once_with("psid-x", "psidts-x", account_index=0)
-        persist_mock.assert_called_once_with("firefox:0")
+        self.assertEqual(r.json(), [])
 
-    def test_use_account_404_when_browser_session_gone(self):
-        with patch("app.endpoints.auth.get_all_cookie_pairs", return_value={"chrome": ("p", "pts")}), \
-             patch("app.endpoints.auth.refresh_gemini_client", new=AsyncMock()) as refresh_mock, \
-             patch("app.endpoints.auth.persist_selected_account_id") as persist_mock:
-            r = self.client.post("/accounts/use", json={"id": "firefox:0"})
-        self.assertEqual(r.status_code, 404)
-        refresh_mock.assert_not_awaited()
-        persist_mock.assert_not_called()
+    def test_refresh_runs_bootstrap_and_reports_added(self):
+        # /accounts/refresh delegates to bootstrap_browser_accounts; verify
+        # the endpoint reports the diff (added ids) without exercising the real
+        # cross-browser discovery.
+        from app.services.account_registry import Account
 
-    def test_use_account_400_on_malformed_id(self):
-        r = self.client.post("/accounts/use", json={"id": "garbage"})
-        self.assertEqual(r.status_code, 400)
+        reg = seeded_registry()  # firefox:0
 
-    def test_use_account_502_on_auth_failure(self):
-        with patch("app.endpoints.auth.get_all_cookie_pairs",
-                   return_value={"firefox": ("p", "pts")}), \
-             patch("app.endpoints.auth.refresh_gemini_client",
-                   new=AsyncMock(return_value="failed")), \
-             patch("app.endpoints.auth.persist_selected_account_id") as persist_mock:
-            r = self.client.post("/accounts/use", json={"id": "firefox:0"})
-        self.assertEqual(r.status_code, 502)
-        # Must NOT persist a failed selection — boot would then loop on a bad cookie pair.
-        persist_mock.assert_not_called()
+        async def fake_bootstrap(registry):
+            registry.upsert(Account(
+                id="chrome:0", source="browser",
+                psid="p", psidts="pts", account_index=0, email="ch@x.com",
+            ))
+            return 1
+
+        with install_registry(reg), \
+             patch("app.endpoints.accounts.bootstrap_browser_accounts",
+                   new=AsyncMock(side_effect=fake_bootstrap)):
+            r = self.client.post("/accounts/refresh")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["upserted"], 1)
+        self.assertEqual(body["added"], ["chrome:0"])
+        self.assertEqual(body["total"], 2)
 
 
 if __name__ == "__main__":
