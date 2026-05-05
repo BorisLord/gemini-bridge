@@ -2,31 +2,15 @@ from typing import ClassVar
 
 import httpx
 from app import settings
+from app.endpoints._shared import FORBIDDEN, registry
 from app.guards import extension_only
 from app.logger import logger
-from app.schemas.request import err_response
-from app.services.account_discovery import (
-    discover_accounts,
-    parse_account_id,
-    probe_gemini_account,
-)
-from app.services.gemini_client import (
-    get_selected_gem_id,
-    persist_selected_account_id,
-    refresh_gemini_client,
-    set_selected_gem_id,
-)
-from app.utils.browser import get_all_cookie_pairs
-from litestar import Controller, get, post
+from app.schemas.openai_chat import err_response
+from app.services.account_discovery import probe_gemini_account
+from app.services.account_registry import Account
+from litestar import Controller, Request, post
 from litestar.exceptions import HTTPException
 from pydantic import BaseModel, Field
-
-_FORBIDDEN = err_response("Origin is not chrome-extension:// and X-Extension-Id is missing.")
-
-
-class GemSelection(BaseModel):
-    # Raw Gem ID or full URL https://gemini.google.com/u/N/gem/<id>; None/"" clears.
-    gem_id: str | None = None
 
 
 class CookiesPayload(BaseModel):
@@ -34,38 +18,15 @@ class CookiesPayload(BaseModel):
     # Chrome supports up to 8 simultaneous Google profiles → /u/0 … /u/7. Mirrors the
     # range scanned by `probe_gemini_account` so the API and the probe can't disagree.
     account_index: int = Field(default=0, ge=0, le=7)
+    # Optional — the extension caches the index→email map from
+    # `/auth/accounts/gemini` and forwards it so `/accounts/` shows it without
+    # a re-probe (which would fail anyway on Chrome device-bound cookies).
+    email: str | None = None
 
 
 class AccountInfo(BaseModel):
     index: int
     email: str
-
-
-class RuntimeController(Controller):
-    path = "/runtime"
-    guards: ClassVar = [extension_only]
-    tags: ClassVar = ["runtime"]
-
-    @get(
-        "/status",
-        summary="Bridge status — currently selected Gem ID",
-        responses={403: _FORBIDDEN},
-    )
-    async def get_status(self) -> dict:
-        return {"gem": {"selected_id": get_selected_gem_id()}}
-
-    @post(
-        "/gem",
-        status_code=200,
-        summary="Select / clear active Gem",
-        responses={403: _FORBIDDEN},
-    )
-    async def select_gem(self, data: GemSelection) -> dict:
-        set_selected_gem_id(data.gem_id)
-        # Don't interpolate request headers — they are spoofable by any local
-        # process and would let a caller plant arbitrary strings into logs.
-        logger.info(f"Gem selection updated: {get_selected_gem_id()!r}")
-        return {"selected_id": get_selected_gem_id()}
 
 
 class AuthController(Controller):
@@ -76,15 +37,14 @@ class AuthController(Controller):
     @post(
         "/cookies/{provider:str}",
         status_code=200,
-        summary="Push Google session cookies",
+        summary="Push Google session cookies (upserts extension:<account_index>)",
         responses={
             400: err_response("Missing __Secure-1PSID or __Secure-1PSIDTS in body."),
-            403: _FORBIDDEN,
+            403: FORBIDDEN,
             501: err_response("Provider other than 'gemini' is not wired."),
-            502: err_response("Authentication failed with the provided cookies."),
         },
     )
-    async def update_cookies(self, provider: str, data: CookiesPayload) -> dict:
+    async def update_cookies(self, provider: str, data: CookiesPayload, request: Request) -> dict:
         if provider != "gemini":
             raise HTTPException(
                 status_code=501,
@@ -94,27 +54,43 @@ class AuthController(Controller):
         psidts = data.cookies.get("__Secure-1PSIDTS")
         if not psid or not psidts:
             raise HTTPException(status_code=400, detail="Missing __Secure-1PSID or __Secure-1PSIDTS")
-        result = await refresh_gemini_client(
-            psid, psidts,
+        reg = registry(request)
+        account_id = f"extension:{data.account_index}"
+        existing = reg.get(account_id)
+        new = Account(
+            id=account_id,
+            source="extension",
+            psid=psid,
+            psidts=psidts,
             account_index=data.account_index,
-            extra_cookies=data.cookies,
+            email=data.email,
+            extra_cookies=dict(data.cookies),
         )
-        if result == "failed":
-            raise HTTPException(status_code=502, detail="Failed to authenticate with provided cookies")
-        if result == "refreshed":
-            logger.info(f"Provider 'gemini' refreshed (u/{data.account_index})")
+        orphan = reg.upsert(new)
+        # Cookies rotated: close the prior client so its auto_refresh /
+        # auto_close background tasks don't keep running on stale credentials.
+        if orphan and orphan.client is not None:
+            try:
+                await orphan.client.close()
+            except Exception as e:
+                logger.warning(f"Failed to close rotated client for {account_id!r}: {e!r}")
+        logger.info(
+            f"Provider 'gemini' upserted as {account_id!r} "
+            f"({'replaced' if existing else 'created'})"
+        )
         return {
             "status": "ok",
             "provider": provider,
+            "account_id": account_id,
             "account_index": data.account_index,
-            "deduped": result == "deduped",
+            "replaced": existing is not None,
         }
 
     @post(
         "/accounts/{provider:str}",
         status_code=200,
         summary="Probe /u/N pages to list authenticated accounts",
-        responses={403: _FORBIDDEN, 501: err_response("Provider other than 'gemini' is not wired.")},
+        responses={403: FORBIDDEN, 501: err_response("Provider other than 'gemini' is not wired.")},
     )
     async def list_accounts(self, provider: str, data: CookiesPayload) -> list[AccountInfo]:
         if provider != "gemini":
@@ -133,65 +109,3 @@ class AuthController(Controller):
                 seen.add(email)
                 found.append(AccountInfo(index=idx, email=email))
         return found
-
-
-class DiscoveredAccount(BaseModel):
-    id: str  # stable selector "<browser>:<account_index>" — used by /accounts/use
-    browser: str
-    index: int
-    email: str
-
-
-class AccountSelection(BaseModel):
-    id: str  # must match a DiscoveredAccount.id from GET /accounts
-
-
-class AccountsController(Controller):
-    """Headless cross-browser account flow. Loopback bind is the security
-    boundary — these endpoints intentionally have no extension guard so the
-    bridge stays usable from CLI / scripts without touching the extension."""
-    path = "/accounts"
-    tags: ClassVar = ["accounts"]
-
-    @get(
-        "/",
-        summary="List every Gemini account reachable from any local browser",
-    )
-    async def list_discovered(self) -> list[DiscoveredAccount]:
-        return [DiscoveredAccount(**a) for a in await discover_accounts()]
-
-    @post(
-        "/use",
-        status_code=200,
-        summary="Switch the active Gemini session by discovered account id",
-        responses={
-            400: err_response("Malformed id (expected `<browser>:<account_index>`)."),
-            404: err_response("No matching browser session for the requested id."),
-            502: err_response("Authentication failed for the selected account's cookies."),
-        },
-    )
-    async def use_account(self, data: AccountSelection) -> dict:
-        parsed = parse_account_id(data.id)
-        if parsed is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Malformed id {data.id!r} — expected `<browser>:<account_index>` with index in 0..7",
-            )
-        browser, account_index = parsed
-
-        pairs = get_all_cookie_pairs("gemini")
-        pair = pairs.get(browser)
-        if not pair:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No browser session for {browser!r}. Available: {sorted(pairs)}",
-            )
-        psid, psidts = pair
-        result = await refresh_gemini_client(psid, psidts, account_index=account_index)
-        if result == "failed":
-            raise HTTPException(status_code=502, detail=f"Auth failed for {data.id}")
-        # Persist selection so the choice survives restart — boot will re-discover
-        # this browser's current cookies and skip the legacy fallback chain.
-        persist_selected_account_id(data.id)
-        logger.info(f"Switched active account to {data.id}")
-        return {"status": "ok", "id": data.id, "deduped": result == "deduped"}

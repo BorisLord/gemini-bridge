@@ -2,10 +2,13 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from app import settings
-from app.endpoints.auth import AccountsController, AuthController, RuntimeController
+from app.endpoints.accounts import AccountsController
+from app.endpoints.auth import AuthController
 from app.endpoints.chat import ChatController
+from app.endpoints.runtime import RuntimeController
 from app.logger import logger
-from app.services.gemini_client import init_gemini_client
+from app.services.account_registry import AccountRegistry
+from app.services.bootstrap import bootstrap_registry
 from litestar import Controller, Litestar, Request, get
 from litestar.config.compression import CompressionConfig
 from litestar.config.cors import CORSConfig
@@ -16,16 +19,19 @@ from litestar.response import Response
 
 
 @asynccontextmanager
-async def _lifespan(_app: Litestar) -> AsyncGenerator[None, None]:
-    result = await init_gemini_client()
-    if result == "ok":
-        logger.info("Gemini client initialized in worker process.")
-    elif result == "no-cookies":
-        logger.warning("Gemini client not initialized — waiting for cookies via /auth/cookies.")
-    elif result == "auth-failed":
-        logger.error("Gemini auth failed at boot — cookies likely expired. Push fresh ones via the extension.")
+async def _lifespan(app: Litestar) -> AsyncGenerator[None, None]:
+    registry = AccountRegistry()
+    app.state.account_registry = registry
+    await bootstrap_registry(registry)
+    accounts = sorted(a.id for a in registry.list())
+    if accounts:
+        logger.info(f"[BOOT] registry populated: {accounts}")
     else:
-        logger.error("Gemini client init crashed — see traceback above.")
+        logger.warning(
+            "[BOOT] registry empty — no Gemini account available. "
+            "Push cookies via the extension, set GEMINI_COOKIE_1PSID/_1PSIDTS, "
+            "or sign into gemini.google.com in a supported browser."
+        )
 
     logger.info(
         "[BOOT] features active: markdown-arg sanitizer, head-tail prompt trim "
@@ -33,6 +39,9 @@ async def _lifespan(_app: Litestar) -> AsyncGenerator[None, None]:
         f"{'on (server/logs/prompts/)' if settings.DUMP_PROMPTS else 'off (set GEMINI_BRIDGE_DUMP_PROMPTS=1)'}"
     )
     yield
+    # Stop per-account auto_refresh / auto_close tasks before the loop closes,
+    # otherwise asyncio logs warnings about pending tasks at shutdown.
+    await registry.close_all()
     logger.info("Application shutdown complete.")
 
 
@@ -127,3 +136,6 @@ app = Litestar(
         ValidationException: _validation_handler,
     },
 )
+# Default registry for code paths that import `app` without running the
+# lifespan (TestClient outside `with`, fresh imports). Replaced at boot.
+app.state.account_registry = AccountRegistry()
