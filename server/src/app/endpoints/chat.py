@@ -1,12 +1,17 @@
+import base64
 import contextlib
+import io
 import json
+import mimetypes
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
+import httpx
 from app import settings
 from app.logger import logger
 from app.schemas.openai_chat import OpenAIChatRequest, err_response
@@ -17,6 +22,7 @@ from litestar import Controller, Request, get, post
 from litestar.enums import MediaType
 from litestar.exceptions import HTTPException
 from litestar.response import Response, ServerSentEvent
+from PIL import Image, UnidentifiedImageError
 
 # gemini-webapi only speaks free-form text → we prompt Gemini to emit a
 # delimited JSON block, then parse it back into OpenAI `tool_calls[]`.
@@ -247,13 +253,20 @@ def _map_gemini_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail=f"Gemini upstream error: {exc}")
 
 
-def convert_to_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None) -> dict:
+def convert_to_openai_format(
+    response_text: str,
+    model: str,
+    tool_calls: list[dict] | None = None,
+    reasoning: str | None = None,
+) -> dict:
     if tool_calls:
-        message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+        message: dict[str, Any] = {"role": "assistant", "content": None, "tool_calls": tool_calls}
         finish = "tool_calls"
     else:
         message = {"role": "assistant", "content": response_text}
         finish = "stop"
+    if reasoning:
+        message["reasoning_content"] = reasoning
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -264,7 +277,12 @@ def convert_to_openai_format(response_text: str, model: str, tool_calls: list[di
     }
 
 
-def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] | None = None) -> Iterator[str]:
+def stream_openai_format(
+    response_text: str,
+    model: str,
+    tool_calls: list[dict] | None = None,
+    reasoning: str | None = None,
+) -> Iterator[str]:
     """Yield raw JSON payloads (and the OpenAI sentinel `[DONE]`).
     `ServerSentEvent` wraps each into `data: <payload>\\n\\n`."""
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -275,6 +293,16 @@ def stream_openai_format(response_text: str, model: str, tool_calls: list[dict] 
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
     }
     yield json.dumps(first)
+
+    if reasoning:
+        # DeepSeek-R1 convention adopted by Cline/opencode/Continue: surface the
+        # thinking trace in its own delta field so the UI can fold it.
+        reasoning_chunk = {
+            "id": chunk_id, "object": "chat.completion.chunk", "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"reasoning_content": reasoning}, "finish_reason": None}],
+        }
+        yield json.dumps(reasoning_chunk)
 
     if tool_calls:
         delta_calls = [
@@ -364,16 +392,18 @@ def _resolve_account(request: Request, model: str) -> tuple[str, Account]:
 
 
 # Mirrors `gemini_webapi.constants` — feeds /v1/models for client auto-discovery.
+# Order matters: clients that auto-register from this endpoint (e.g. examples/pi.ts)
+# pick the first entry as the default model, so the strongest tier comes first.
 GEMINI_MODEL_IDS = [
-    "gemini-3-pro",
-    "gemini-3-flash",
-    "gemini-3-flash-thinking",
-    "gemini-3-pro-plus",
-    "gemini-3-flash-plus",
-    "gemini-3-flash-thinking-plus",
     "gemini-3-pro-advanced",
     "gemini-3-flash-advanced",
     "gemini-3-flash-thinking-advanced",
+    "gemini-3-pro-plus",
+    "gemini-3-flash-plus",
+    "gemini-3-flash-thinking-plus",
+    "gemini-3-pro",
+    "gemini-3-flash",
+    "gemini-3-flash-thinking",
 ]
 
 
@@ -405,6 +435,133 @@ def _trim_messages_to_fit(messages: list, tools: list | None, cap: int, max_char
     return trimmed, len(rest) - 1
 
 
+def _coerce_text_content(content: Any) -> str:
+    """Return only the textual portion of an OpenAI `content` field. Strings pass
+    through; multimodal arrays are reduced to their `{type: "text"}` blocks
+    (image_url blocks are routed to `files=` separately, not to the prompt)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            (b.get("text") or "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
+_DATA_URL_MIME_RE = re.compile(r"^data:([^;,]+)(?:;[^,]*)?,", re.IGNORECASE)
+
+
+def _ext_for_mime(mime: str) -> str:
+    """Map a MIME type back to a file extension. `gemini-webapi.upload_file`
+    only inspects the filename to set the upload's Content-Type — bytes-only
+    inputs get a `.txt` default that makes Google silently abort image
+    requests, so we round-trip through `mimetypes` to keep the right suffix."""
+    return mimetypes.guess_extension(mime) or ".bin"
+
+
+def _maybe_resize_image(data: bytes, mime: str) -> tuple[bytes, str]:
+    """Downscale + recompress images above Gemini Web's silent-abort
+    threshold (~150 KB binary): flatten alpha, try PNG at decreasing dims
+    (lossless on text), fall back to JPEG q=95→45 when PNG won't fit.
+    Pass-through on Pillow decode failure (e.g. webp animation)."""
+    if not mime.startswith("image/") or len(data) <= settings.MAX_IMAGE_BYTES:
+        return data, mime
+    try:
+        orig = Image.open(io.BytesIO(data))
+        orig.load()
+    except (UnidentifiedImageError, OSError):
+        return data, mime
+    if orig.mode in ("RGBA", "LA") or (orig.mode == "P" and "transparency" in orig.info):
+        rgba = orig.convert("RGBA")
+        flat = Image.new("RGB", rgba.size, (255, 255, 255))
+        flat.paste(rgba, mask=rgba.split()[-1])
+        orig = flat
+    elif orig.mode != "RGB":
+        orig = orig.convert("RGB")
+    last_buf: io.BytesIO | None = None
+    last_mime = "image/jpeg"
+    for max_dim in (settings.MAX_IMAGE_DIM, 1024, 768, 512):
+        img = orig.copy()
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        # PNG first — lossless on text. If it fits, ship it.
+        png_buf = io.BytesIO()
+        img.save(png_buf, "PNG", optimize=True)
+        if len(png_buf.getvalue()) <= settings.MAX_IMAGE_BYTES:
+            return png_buf.getvalue(), "image/png"
+        for quality in (95, 85, 75, 65, 55, 45):
+            jpg_buf = io.BytesIO()
+            img.save(jpg_buf, "JPEG", quality=quality, optimize=True, progressive=True)
+            last_buf = jpg_buf
+            if len(jpg_buf.getvalue()) <= settings.MAX_IMAGE_BYTES:
+                return jpg_buf.getvalue(), "image/jpeg"
+    return last_buf.getvalue(), last_mime
+
+
+async def _extract_files_from_messages(messages: list) -> list[Path]:
+    """Materialize `image_url` blocks from OpenAI multimodal content into
+    tempfiles with the right extension, in declaration order. Returns a list
+    of paths — caller is responsible for unlink (try/finally)."""
+    paths: list[Path] = []
+    try:
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "image_url":
+                    continue
+                url = (block.get("image_url") or {}).get("url")
+                if not isinstance(url, str) or not url:
+                    raise HTTPException(status_code=400, detail="image_url block missing 'url' field")
+                if url.startswith("data:"):
+                    m = _DATA_URL_MIME_RE.match(url)
+                    mime = (m.group(1) if m else "application/octet-stream").strip().lower()
+                    _, _, b64 = url.partition(",")
+                    try:
+                        data = base64.b64decode(b64, validate=False)
+                    except Exception as e:
+                        raise HTTPException(status_code=400, detail=f"Invalid data URL: {e}") from e
+                    data, mime = _maybe_resize_image(data, mime)
+                    paths.append(_write_tempfile(data, _ext_for_mime(mime)))
+                elif url.startswith(("http://", "https://")):
+                    # follow_redirects=False — a redirect to 127.0.0.1/localhost
+                    # would let an attacker probe loopback services through the
+                    # bridge. Loopback-bind is the real defense; this closes
+                    # the SSRF angle for any future remote-exposure mode.
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
+                            r = await http.get(url)
+                            r.raise_for_status()
+                    except Exception as e:
+                        raise HTTPException(
+                            status_code=400, detail=f"Failed to download image_url {url!r}: {e}",
+                        ) from e
+                    mime = (r.headers.get("content-type") or "application/octet-stream").split(";")[0].strip().lower()
+                    data, mime = _maybe_resize_image(r.content, mime)
+                    paths.append(_write_tempfile(data, _ext_for_mime(mime)))
+                else:
+                    raise HTTPException(status_code=400, detail=f"Unsupported image_url scheme: {url!r}")
+    except Exception:
+        for p in paths:
+            with contextlib.suppress(OSError):
+                p.unlink()
+        raise
+    return paths
+
+
+def _write_tempfile(data: bytes, suffix: str) -> Path:
+    f = tempfile.NamedTemporaryFile(  # noqa: SIM115 — we manage lifecycle in the call site
+        prefix="gemini-bridge-img-", suffix=suffix, delete=False,
+    )
+    try:
+        f.write(data)
+    finally:
+        f.close()
+    return Path(f.name)
+
+
 def _build_prompt_from_messages(messages: list, tools: list | None, cap: int) -> tuple[str, int, int]:
     """Render OpenAI-shaped messages into the textual format Gemini expects.
     Returns (final_prompt, truncated_results, dropped_chars)."""
@@ -413,7 +570,7 @@ def _build_prompt_from_messages(messages: list, tools: list | None, cap: int) ->
     dropped = 0
     for msg in messages:
         role = msg.get("role", "user")
-        content = msg.get("content", "")
+        content = _coerce_text_content(msg.get("content", ""))
         tcs = msg.get("tool_calls")
         if role == "system" and content:
             parts.append(f"System: {content}")
@@ -560,91 +717,118 @@ class ChatController(Controller):
                   chars_dropped=total_truncated_chars, max_per_result=cap)
 
         # Avoid Gemini Web's silent-abort: trim oldest non-system messages, leave a placeholder.
+        # Reassigning `messages_data` here keeps file extraction below in lockstep with the
+        # trimmed history — otherwise a dropped older message would still upload its image
+        # while its textual context has been elided.
         if len(final_prompt) > settings.MAX_PROMPT_CHARS:
-            trimmed_msgs, trimmed_count = _trim_messages_to_fit(
+            messages_data, trimmed_count = _trim_messages_to_fit(
                 messages_data, data.tools, cap, settings.MAX_PROMPT_CHARS,
             )
             final_prompt, truncated_tool_results, total_truncated_chars = _build_prompt_from_messages(
-                trimmed_msgs, data.tools, cap,
+                messages_data, data.tools, cap,
             )
             _dlog("PROMPT.TRIM", req=req_id, dropped=trimmed_count,
-                  kept_msgs=len(trimmed_msgs), final_chars=len(final_prompt))
+                  kept_msgs=len(messages_data), final_chars=len(final_prompt))
 
-        if not final_prompt:
-            raise HTTPException(status_code=400, detail="No valid messages found.")
-        _dlog("PROMPT", _verbose=True, req=req_id, total_chars=len(final_prompt),
-              head=_truncate(final_prompt[:1500], 1500),
-              tail=_truncate(final_prompt[-1500:], 1500))
-
-        if settings.DUMP_PROMPTS:
-            try:
-                _PROMPTS_DUMP_DIR.mkdir(parents=True, exist_ok=True)
-                (_PROMPTS_DUMP_DIR / f"{int(time.time())}_{req_id}.txt").write_text(final_prompt)
-                (_PROMPTS_DUMP_DIR / "last.txt").write_text(final_prompt)
-                timestamped = sorted(
-                    (p for p in _PROMPTS_DUMP_DIR.iterdir()
-                     if p.is_file() and p.name != "last.txt" and p.suffix == ".txt"),
-                    key=lambda p: p.stat().st_mtime,
-                )
-                for stale in timestamped[:-settings.PROMPT_DUMP_RETAIN]:
-                    with contextlib.suppress(OSError):
-                        stale.unlink()
-            except Exception as e:
-                logger.warning(f"[shim] full-prompt dump failed: {e}")
-
-        t0 = time.time()
-
-        _dlog("PROMPT.STAT", req=req_id,
-              msgs_total=len(data.messages),
-              prompt_chars=len(final_prompt),
-              has_tools=bool(data.tools),
-              tools_count=(len(data.tools) if data.tools else 0))
-
+        files_paths = await _extract_files_from_messages(messages_data)
+        # Wrap everything from here to the response in a single finally so a tempfile
+        # leak is impossible regardless of which branch raises (HTTP 400, dump-prompt
+        # failure, generate_content error, etc.). gemini-webapi reads + uploads files
+        # synchronously inside generate_content, so unlinking before the SSE generator
+        # is consumed is safe (the synthetic stream replays cached text).
         try:
-            response = await client.generate_content(
-                final_prompt,
-                model=clean_model,
-                files=None,
-                gem=account.selected_gem_id,
-            )
-        except Exception as e:
-            mapped = _map_gemini_error(e)
-            _dlog("GEMINI.ERR", req=req_id, account_id=account.id,
-                  err_type=type(e).__name__, err=_truncate(str(e), 500))
-            logger.error(
-                f"Error in /v1/chat/completions endpoint (account_id={account.id}): {e}",
-                exc_info=True,
-            )
-            raise mapped from e
+            if files_paths:
+                _dlog("REQ.FILES", req=req_id, count=len(files_paths),
+                      paths=[str(p) for p in files_paths],
+                      total_bytes=sum(p.stat().st_size for p in files_paths))
 
-        raw_text = response.text or ""
-        _dlog("GEMINI.OK", req=req_id, account_id=account.id,
-              latency_s=round(time.time() - t0, 2), resp_chars=len(raw_text))
-        _dlog("GEMINI.BODY", _verbose=True, req=req_id, resp_full=_truncate(raw_text, 2500))
+            if not final_prompt and not files_paths:
+                raise HTTPException(status_code=400, detail="No valid messages found.")
+            _dlog("PROMPT", _verbose=True, req=req_id, total_chars=len(final_prompt),
+                  head=_truncate(final_prompt[:1500], 1500),
+                  tail=_truncate(final_prompt[-1500:], 1500))
 
-        tool_names: set[str] = set()
-        if data.tools:
-            for t in data.tools:
-                fn = t.get("function") or t
-                n = fn.get("name")
-                if n:
-                    tool_names.add(n)
-        tool_calls = _extract_tool_calls(raw_text, tool_names) if data.tools else []
-        final_text = _TOOL_CALL_RE.sub("", _TEXT_TOOL_CALL_RE.sub("", raw_text)).strip() if tool_calls else raw_text
-        _dlog("SHIM", req=req_id, tool_calls_extracted=len(tool_calls),
-              first_call=(json.dumps(tool_calls[0]) if tool_calls else None),
-              fallback_used=bool(tool_calls and not _TOOL_CALL_RE.search(raw_text)))
+            if settings.DUMP_PROMPTS:
+                try:
+                    _PROMPTS_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+                    (_PROMPTS_DUMP_DIR / f"{int(time.time())}_{req_id}.txt").write_text(final_prompt)
+                    (_PROMPTS_DUMP_DIR / "last.txt").write_text(final_prompt)
+                    timestamped = sorted(
+                        (p for p in _PROMPTS_DUMP_DIR.iterdir()
+                         if p.is_file() and p.name != "last.txt" and p.suffix == ".txt"),
+                        key=lambda p: p.stat().st_mtime,
+                    )
+                    for stale in timestamped[:-settings.PROMPT_DUMP_RETAIN]:
+                        with contextlib.suppress(OSError):
+                            stale.unlink()
+                except Exception as e:
+                    logger.warning(f"[shim] full-prompt dump failed: {e}")
 
-        if is_stream:
-            _dlog("RESP.STREAM", req=req_id, account_id=account.id,
-                  mode="sse", with_tool_calls=bool(tool_calls))
-            # Echo `data.model` (suffixed) — OpenCode pickers compare the response model.
-            return ServerSentEvent(
-                stream_openai_format(final_text, data.model, tool_calls or None),
+            t0 = time.time()
+
+            _dlog("PROMPT.STAT", req=req_id,
+                  msgs_total=len(data.messages),
+                  prompt_chars=len(final_prompt),
+                  has_tools=bool(data.tools),
+                  tools_count=(len(data.tools) if data.tools else 0))
+
+            try:
+                response = await client.generate_content(
+                    final_prompt,
+                    model=clean_model,
+                    files=[str(p) for p in files_paths] or None,
+                    gem=account.selected_gem_id,
+                )
+            except Exception as e:
+                mapped = _map_gemini_error(e)
+                _dlog("GEMINI.ERR", req=req_id, account_id=account.id,
+                      err_type=type(e).__name__, err=_truncate(str(e), 500))
+                logger.error(
+                    f"Error in /v1/chat/completions endpoint (account_id={account.id}): {e}",
+                    exc_info=True,
+                )
+                raise mapped from e
+
+            raw_text = response.text or ""
+            raw_thoughts = response.thoughts or ""
+            _dlog("GEMINI.OK", req=req_id, account_id=account.id,
+                  latency_s=round(time.time() - t0, 2), resp_chars=len(raw_text),
+                  thoughts_chars=len(raw_thoughts))
+            _dlog("GEMINI.BODY", _verbose=True, req=req_id, resp_full=_truncate(raw_text, 2500))
+
+            tool_names: set[str] = set()
+            if data.tools:
+                for t in data.tools:
+                    fn = t.get("function") or t
+                    n = fn.get("name")
+                    if n:
+                        tool_names.add(n)
+            tool_calls = _extract_tool_calls(raw_text, tool_names) if data.tools else []
+            final_text = _TOOL_CALL_RE.sub("", _TEXT_TOOL_CALL_RE.sub("", raw_text)).strip() if tool_calls else raw_text
+            _dlog("SHIM", req=req_id, tool_calls_extracted=len(tool_calls),
+                  first_call=(json.dumps(tool_calls[0]) if tool_calls else None),
+                  fallback_used=bool(tool_calls and not _TOOL_CALL_RE.search(raw_text)))
+
+            if is_stream:
+                _dlog("RESP.STREAM", req=req_id, account_id=account.id,
+                      mode="sse", with_tool_calls=bool(tool_calls),
+                      with_reasoning=bool(raw_thoughts))
+                # Echo `data.model` (suffixed) — OpenCode pickers compare the response model.
+                return ServerSentEvent(
+                    stream_openai_format(
+                        final_text, data.model, tool_calls or None, reasoning=raw_thoughts or None,
+                    ),
+                )
+            _dlog("RESP.JSON", req=req_id, account_id=account.id,
+                  mode="json", with_tool_calls=bool(tool_calls),
+                  with_reasoning=bool(raw_thoughts))
+            return Response(
+                content=convert_to_openai_format(
+                    final_text, data.model, tool_calls or None, reasoning=raw_thoughts or None,
+                ),
+                media_type=MediaType.JSON,
             )
-        _dlog("RESP.JSON", req=req_id, account_id=account.id,
-              mode="json", with_tool_calls=bool(tool_calls))
-        return Response(
-            content=convert_to_openai_format(final_text, data.model, tool_calls or None),
-            media_type=MediaType.JSON,
-        )
+        finally:
+            for p in files_paths:
+                with contextlib.suppress(OSError):
+                    p.unlink()

@@ -60,6 +60,14 @@ ACCOUNT_REFRESH_INTERVAL_SECONDS: float = _float("GEMINI_BRIDGE_ACCOUNT_REFRESH_
 # Per-tier char budgets per tool result (free 32k tok, Pro/Ultra 1M tok).
 TIER_TOOL_RESULT_CAPS: dict[str, int] = {"free": 8_000, "plus": 32_000, "advanced": 128_000}
 
+# Gemini Web silently aborts (or hallucinates) on attachments around ~150 KB
+# binary; the threshold drifts per model/session. Default cap leaves ~20 %
+# headroom so we don't hit the wall on edge sessions.
+MAX_IMAGE_BYTES: int = _int("GEMINI_BRIDGE_MAX_IMAGE_BYTES", 120 * 1024)
+# Max edge length when downscaling — Gemini's documented sweet spot for
+# image understanding is around 1568 px on the long side.
+MAX_IMAGE_DIM: int = _int("GEMINI_BRIDGE_MAX_IMAGE_DIM", 1568)
+
 DEBUG_LOG_PATH: str = "/tmp/gemini-bridge-debug.log"
 DEBUG_LOG_MAX_BYTES: int = 10 * 1024 * 1024
 
