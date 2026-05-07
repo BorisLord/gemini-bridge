@@ -61,6 +61,8 @@ multipart==1.3.1
     # via litestar
 orjson==3.11.8
     # via gemini-webapi
+pillow==12.2.0
+    # via gemini-bridge (pyproject.toml)
 polyfactory==3.3.0
     # via litestar
 pycparser==2.22
