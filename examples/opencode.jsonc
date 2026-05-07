@@ -6,6 +6,12 @@
 // `curl http://localhost:6969/accounts/`. Replace `firefox:0` below with the
 // id(s) you actually have. Duplicate per account to expose multi-account
 // quotas in the picker.
+//
+// `attachment: true` + `modalities.input: ["text","image"]` + `modalities.output: ["text"]`
+// are required by opencode's schema so drag-and-dropped images are forwarded as OpenAI
+// multimodal `image_url` blocks instead of stripping them to a `[Image 1]` placeholder.
+// `reasoning: true` on `-thinking-*` variants surfaces the bridge's `reasoning_content`
+// chunks (Gemini 2.5 Thinking chain-of-thought).
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
@@ -14,15 +20,15 @@
       "name": "Gemini Web",
       "options": { "baseURL": "http://localhost:6969/v1", "apiKey": "dummy" },
       "models": {
-        "gemini-3-pro-advanced@firefox:0":            { "name": "Ultra · Pro",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-advanced@firefox:0":          { "name": "Ultra · Flash",          "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-advanced@firefox:0": { "name": "Ultra · Flash Thinking", "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro-plus@firefox:0":                { "name": "Pro · Pro",              "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-plus@firefox:0":              { "name": "Pro · Flash",            "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking-plus@firefox:0":     { "name": "Pro · Flash Thinking",   "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-pro@firefox:0":                     { "name": "Free · Pro",             "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash@firefox:0":                   { "name": "Free · Flash",           "limit": { "context": 1000000, "output": 65536 } },
-        "gemini-3-flash-thinking@firefox:0":          { "name": "Free · Flash Thinking",  "limit": { "context": 1000000, "output": 65536 } }
+        "gemini-3-pro-advanced@firefox:0":            { "name": "Ultra · Pro",            "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-flash-advanced@firefox:0":          { "name": "Ultra · Flash",          "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-flash-thinking-advanced@firefox:0": { "name": "Ultra · Flash Thinking", "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "reasoning": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-pro-plus@firefox:0":                { "name": "Pro · Pro",              "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-flash-plus@firefox:0":              { "name": "Pro · Flash",            "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-flash-thinking-plus@firefox:0":     { "name": "Pro · Flash Thinking",   "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "reasoning": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-pro@firefox:0":                     { "name": "Free · Pro",             "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-flash@firefox:0":                   { "name": "Free · Flash",           "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "modalities": { "input": ["text", "image"], "output": ["text"] } },
+        "gemini-3-flash-thinking@firefox:0":          { "name": "Free · Flash Thinking",  "limit": { "context": 1000000, "output": 65536 }, "attachment": true, "reasoning": true, "modalities": { "input": ["text", "image"], "output": ["text"] } }
 
         // ── Add a second account by duplicating any line above and changing
         //    both the `@<id>` suffix and the display name. Leading-comma style:

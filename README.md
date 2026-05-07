@@ -83,12 +83,15 @@ Update with `git pull && ./start.sh` (Docker: `docker compose up --build -d`; sy
 
 Any client speaking `/v1/chat/completions` works against `http://localhost:6969/v1`. Drop-in configs ship in [`examples/`](examples/):
 
-| Client | Config | Note |
-|---|---|---|
-| OpenCode | [`opencode.jsonc`](examples/opencode.jsonc) | merge `provider.gemini-web` into `~/.config/opencode/opencode.jsonc` |
-| Zed | [`zed.jsonc`](examples/zed.jsonc) | merge into `~/.config/zed/settings.json` |
+| Client | Config | Discovery | Note |
+|---|---|---|---|
+| OpenCode | [`opencode.jsonc`](examples/opencode.jsonc) | manual | merge `provider.gemini-web` into `~/.config/opencode/opencode.jsonc` |
+| Zed | [`zed.jsonc`](examples/zed.jsonc) | manual | merge into `~/.config/zed/settings.json` |
+| Pi | [`pi.ts`](examples/pi.ts) | auto via `/v1/models` | drop into `~/.pi/agent/extensions/` |
 
-Model ID suffixes: `-plus` = AI Pro, `-advanced` = AI Ultra, none = Free. Trim entries to match your subscription.
+Model suffixes: `-plus` = AI Pro, `-advanced` = AI Ultra, none = Free. Trim entries to your subscription.
+
+The bridge accepts OpenAI-shape `image_url` blocks and surfaces Gemini Thinking as `reasoning_content`, but **Zed and opencode strip both unless the model entry declares the capability flags** — the shipped examples already do, copy them verbatim. Pi auto-detects via the `-thinking` suffix.
 
 **Got another client working?** PR welcome — drop an `examples/<client>.<ext>` with version tested + quirks in the header.
 
@@ -207,7 +210,7 @@ The bridge depends on [`HanaokaYuzu/Gemini-API`](https://github.com/HanaokaYuzu/
 
 Dev: `mise run lint && mise run test` (or `cd server && python -m unittest discover tests -v`). Architecture notes in [`AGENTS.md`](AGENTS.md). Issues and PRs welcome.
 
-If this saves you an API bill, [**leave a star**](https://github.com/BorisLord/gemini-bridge/stargazers) — it's how others find it.
+⭐ Star [the repo](https://github.com/BorisLord/gemini-bridge/stargazers) if you find it useful — that's how others discover it.
 
 ## License
 

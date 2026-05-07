@@ -43,7 +43,7 @@ Health check: `curl http://localhost:6969/healthz`.
 | `server/src/app/schemas/openai_chat.py` | `OpenAIChatRequest` + `ChatMessage` Pydantic models. |
 | `server/tests/` | stdlib `unittest` — endpoints, tool-call shim, routing precedence, registry lifecycle. |
 | `extension/` | Chrome MV3 — `popup.{html,js}`, `background.js`, `providers.js`, `manifest.json`. |
-| `examples/` | Drop-in client configs (`opencode.jsonc`, `zed.jsonc`). |
+| `examples/` | Drop-in client configs (`opencode.jsonc`, `zed.jsonc`, `pi.ts`). |
 
 ## Known pitfalls (not derivable from code)
 
@@ -58,12 +58,14 @@ Health check: `curl http://localhost:6969/healthz`.
 - **Synthetic SSE** — `gemini-webapi` returns the full response in one shot; the bridge then chunks it into SSE frames.
 - **Tool-calling via regex shim** — Gemini Web has no native function calling. The bridge injects a custom system prompt asking Gemini to emit `<<TOOL_CALL>>{...}<<END>>`, then parses it back into OpenAI `tool_calls[]`.
 - **Request timeout deferred to lib** — `AccountRoutedGeminiClient.init` is called with `timeout=settings.REQUEST_TIMEOUT_SECONDS`. Do not re-wrap `client.generate_content` in `asyncio.wait_for` — it would double-time the request and lose the lib's zombie-stream retry. Override via `GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS=N`.
+- **Vision via tempfile, not bytes** — `image_url` blocks are materialized to `/tmp/gemini-bridge-img-*` with a MIME-derived suffix before `generate_content(files=...)`. Raw `bytes` default-name uploads to `.txt`, which Gemini silent-aborts. Cleanup in `try/finally` around the whole handler; extraction runs *after* trimming so dropped messages don't leak uploads.
+- **Image resize to ~150 KB** — Google's upload returns `HTTP Error 0: OK` on big PNGs and Gemini hallucinates above ~150 KB binary, so `_maybe_resize_image()` flattens alpha and downscales (PNG first, JPEG q=95→45 fallback). Knobs: `GEMINI_BRIDGE_MAX_IMAGE_BYTES`, `GEMINI_BRIDGE_MAX_IMAGE_DIM`. Pi and Zed describe screenshots reliably; **opencode vision is flaky** (hallucination on ~30 % of dense screenshots even after resize). Suspected cause is opencode's prompt shape (`[Image 1]` placeholder without an explicit anchor); we don't work around it — Pi-style "tool-result image" wins, opencode's drag-and-drop is upstream's call to fix.
+- **Reasoning via `reasoning_content`** — `ModelOutput.thoughts` is surfaced as DeepSeek-R1-style `reasoning_content` (own SSE chunk between role and content; extra key on non-stream `message`). Empty/None → field omitted. Clients must opt in (`reasoning: true` for opencode, `capabilities.interleaved_reasoning: true` for Zed, `compat.thinkingFormat: "deepseek"` for pi) — see `examples/`. Vision needs a parallel opt-in: `attachment` + `modalities.input` for opencode, `capabilities.images` for Zed; pi handles both via `input: ["text","image"]` + auto-detect on `-thinking` suffix.
 
 ## Working rules
 
 - Before claiming "done", always run `mise run lint && mise run test`.
 - When touching OpenAI-compat endpoints (`/v1/*`), test with both a plain `curl` **and** a real client (Chrome extension or `examples/opencode.jsonc`) — Pydantic validation can pass while serialization breaks on the SDK side.
-- **Never** restart the running bridge service or kill the process listening on `:6969` without confirmation — a dev instance may be in use.
 - All files in this repo must be in English (code, docs, comments, commit messages).
 - OpenAPI is off by default. `GEMINI_BRIDGE_ENABLE_DOCS=1` exposes Stoplight Elements at `/docs` (raw schema at `/docs/openapi.json`). Other Litestar UIs (Swagger, Redoc, …) are intentionally not registered — see `render_plugins=` in `app/main.py`.
 
@@ -83,8 +85,8 @@ The Chrome extension is **permanently developer-mode (Load unpacked)** — never
 ### Tests
 
 - **Tests are rigid.** A red test means the code broke a contract — fix the code, not the assertion. Only touch the assertion if the contract has explicitly changed.
-- New code = new tests for the *expected* behavior, not a copy of the *observed* behavior.
-- Mocks **only at the boundary** (external HTTP, time, randomness). Never on internal services / disk — they hide wiring bugs.
+- Mocks **only at the boundary** (external HTTP, time, randomness). Never on internal services / disk.
+- **A new test must hit at least one of three criteria**: (1) regression of a real upstream-Gemini quirk not obvious from the code (silent abort at ~100 KB, JSON-quoted email scrape, captcha 302, …), (2) pins an external contract (response shape, status, header) a client depends on, (3) non-trivial conditional logic of the bridge (env > config precedence, head-tail trim, tool-call shim, `/u/N/` URL rewrite). If none apply, don't write it. Testing `Field(ge=0)` or `mock.called_with(...)` is testing the framework.
 
 ## Security
 

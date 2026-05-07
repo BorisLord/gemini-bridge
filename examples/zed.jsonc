@@ -9,27 +9,35 @@
 // — bare names get rejected with 400. List your registered accounts with
 // `curl http://localhost:6969/accounts/`. Replace `firefox:0` below with the
 // id(s) you actually have. Duplicate per account for multi-account quotas.
+//
+// Zed's `capabilities` sub-object requires every boolean field once present (see
+// `crates/settings_content/src/language_model.rs`); omitting one yields
+// `missing field tools`. The bridge supports OpenAI-style `tools[]` via a regex
+// shim (no native function calling), so `tools: true` is functional but
+// `parallel_tool_calls` and `prompt_cache_key` are not. `images: true` enables
+// vision attachments. `interleaved_reasoning: true` on `-thinking-*` variants
+// surfaces the bridge's `reasoning_content` chunks as a separate thinking pane.
 {
   "language_models": {
     "openai_compatible": {
       "Gemini Bridge": {
         "api_url": "http://localhost:6969/v1",
         "available_models": [
-          { "name": "gemini-3-pro-advanced@firefox:0",            "display_name": "Ultra · Pro",            "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-flash-advanced@firefox:0",          "display_name": "Ultra · Flash",          "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-flash-thinking-advanced@firefox:0", "display_name": "Ultra · Flash Thinking", "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-pro-plus@firefox:0",                "display_name": "Pro · Pro",              "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-flash-plus@firefox:0",              "display_name": "Pro · Flash",            "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-flash-thinking-plus@firefox:0",     "display_name": "Pro · Flash Thinking",   "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-pro@firefox:0",                     "display_name": "Free · Pro",             "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-flash@firefox:0",                   "display_name": "Free · Flash",           "max_tokens": 1000000, "max_output_tokens": 65536 },
-          { "name": "gemini-3-flash-thinking@firefox:0",          "display_name": "Free · Flash Thinking",  "max_tokens": 1000000, "max_output_tokens": 65536 }
+          { "name": "gemini-3-pro-advanced@firefox:0",            "display_name": "Ultra · Pro",            "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } },
+          { "name": "gemini-3-flash-advanced@firefox:0",          "display_name": "Ultra · Flash",          "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } },
+          { "name": "gemini-3-flash-thinking-advanced@firefox:0", "display_name": "Ultra · Flash Thinking", "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false, "interleaved_reasoning": true } },
+          { "name": "gemini-3-pro-plus@firefox:0",                "display_name": "Pro · Pro",              "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } },
+          { "name": "gemini-3-flash-plus@firefox:0",              "display_name": "Pro · Flash",            "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } },
+          { "name": "gemini-3-flash-thinking-plus@firefox:0",     "display_name": "Pro · Flash Thinking",   "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false, "interleaved_reasoning": true } },
+          { "name": "gemini-3-pro@firefox:0",                     "display_name": "Free · Pro",             "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } },
+          { "name": "gemini-3-flash@firefox:0",                   "display_name": "Free · Flash",           "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } },
+          { "name": "gemini-3-flash-thinking@firefox:0",          "display_name": "Free · Flash Thinking",  "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false, "interleaved_reasoning": true } }
 
           // ── Add a second account by duplicating any line above and changing
           //    both the `@<id>` suffix and the display name. Leading-comma style:
           //    just remove the `// ` prefix, no other edit.
-          // ,{ "name": "gemini-3-pro-plus@extension:0", "display_name": "Pro · Pro · Chrome",     "max_tokens": 1000000, "max_output_tokens": 65536 }
-          // ,{ "name": "gemini-3-pro-plus@firefox:1",   "display_name": "Pro · Pro · Firefox #2", "max_tokens": 1000000, "max_output_tokens": 65536 }
+          // ,{ "name": "gemini-3-pro-advanced@extension:0", "display_name": "Ultra · Pro · Chrome",     "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } }
+          // ,{ "name": "gemini-3-pro-advanced@firefox:1",   "display_name": "Ultra · Pro · Firefox #2", "max_tokens": 1000000, "max_output_tokens": 65536, "capabilities": { "tools": true, "images": true, "parallel_tool_calls": false, "prompt_cache_key": false } }
         ]
       }
     }
