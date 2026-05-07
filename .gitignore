@@ -28,3 +28,4 @@ server/logs/
 .memsearch
 plans
 CLAUDE.md
+config.ini
