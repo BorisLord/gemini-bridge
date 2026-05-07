@@ -1,6 +1,6 @@
 """Single source of truth for env-var reads. Module constants for boot-time
 switches; functions for values that mutate between requests (tests stub them,
-or they compose with `config.conf` in `gemini_client._resolve_*`)."""
+or they compose with `config.ini` in `bootstrap._resolve_*`)."""
 import os
 
 _TRUTHY = ("1", "true", "yes", "on")
@@ -50,8 +50,23 @@ PROMPT_DUMP_RETAIN: int = 30  # last.txt is always kept on top of those.
 # Passed to gemini-webapi `init(timeout=...)` — caps streaming + polling lib-side.
 # Bump for Ultra users running deep_research / large file analysis.
 REQUEST_TIMEOUT_SECONDS: float = _float("GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS", 90.0)
+# Forwarded to gemini-webapi `init(close_delay=...)` per account: the lib closes
+# its AsyncSession after this many idle seconds, then `@running` re-inits it
+# transparently on the next request. 30 min default.
+ACCOUNT_IDLE_CLOSE_SECONDS: float = _float("GEMINI_BRIDGE_ACCOUNT_IDLE_CLOSE_SECONDS", 1800.0)
+# Forwarded to `init(refresh_interval=...)`: cadence at which the lib rotates
+# `__Secure-1PSIDTS` in background, per account. Lib's default = 600s.
+ACCOUNT_REFRESH_INTERVAL_SECONDS: float = _float("GEMINI_BRIDGE_ACCOUNT_REFRESH_INTERVAL_SECONDS", 600.0)
 # Per-tier char budgets per tool result (free 32k tok, Pro/Ultra 1M tok).
 TIER_TOOL_RESULT_CAPS: dict[str, int] = {"free": 8_000, "plus": 32_000, "advanced": 128_000}
+
+# Gemini Web silently aborts (or hallucinates) on attachments around ~150 KB
+# binary; the threshold drifts per model/session. Default cap leaves ~20 %
+# headroom so we don't hit the wall on edge sessions.
+MAX_IMAGE_BYTES: int = _int("GEMINI_BRIDGE_MAX_IMAGE_BYTES", 120 * 1024)
+# Max edge length when downscaling — Gemini's documented sweet spot for
+# image understanding is around 1568 px on the long side.
+MAX_IMAGE_DIM: int = _int("GEMINI_BRIDGE_MAX_IMAGE_DIM", 1568)
 
 DEBUG_LOG_PATH: str = "/tmp/gemini-bridge-debug.log"
 DEBUG_LOG_MAX_BYTES: int = 10 * 1024 * 1024
@@ -72,7 +87,7 @@ def cookie_1psidts_env() -> str | None:
 
 
 def account_index_env() -> int | None:
-    """`None` = not set / invalid → callers fall back to config.conf."""
+    """`None` = not set / invalid → callers fall back to config.ini."""
     raw = os.environ.get("GEMINI_BRIDGE_ACCOUNT_INDEX")
     if not raw:
         return None
@@ -84,11 +99,3 @@ def account_index_env() -> int | None:
 
 def initial_gem_id_env() -> str | None:
     return _optional("GEMINI_BRIDGE_GEM_ID")
-
-
-def selected_account_id_env() -> str | None:
-    """Cross-browser selector (`<browser>:<account_index>`, e.g. `firefox:1`)
-    consumed by `_resolve_selected_account_id` at boot. Higher precedence than
-    the same key in `[Cookies]` of `config.conf` so a Docker/CI run can pin
-    its session purely from the environment."""
-    return _optional("GEMINI_BRIDGE_SELECTED_ACCOUNT_ID")

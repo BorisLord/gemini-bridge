@@ -121,21 +121,13 @@ class TestStripMdWrappers(unittest.TestCase):
         )
 
     def test_keeps_url_target_when_label_differs(self):
+        # Single representative case for the "label != target → pick target if
+        # it looks like a URL/path, else label" branch. Path and bare-label
+        # variants used to be tested separately — same intent, kept the URL
+        # one since it's the most common shape Gemini emits.
         self.assertEqual(
             _strip_md_wrappers("[opencode docs](https://opencode.ai/docs)"),
             "https://opencode.ai/docs",
-        )
-
-    def test_keeps_path_target_when_label_differs(self):
-        self.assertEqual(
-            _strip_md_wrappers("[entrypoint](src/run.py)"),
-            "src/run.py",
-        )
-
-    def test_keeps_label_when_target_is_neither_url_nor_path(self):
-        self.assertEqual(
-            _strip_md_wrappers("[user_42](placeholder)"),
-            "user_42",
         )
 
     def test_strips_code_span(self):

@@ -7,19 +7,19 @@ OpenAI-compatible Python proxy (Litestar) that exposes Gemini Web (`gemini.googl
 ## Stack
 
 - Python 3.13 pinned via `mise.toml`
-- Litestar 2.21 + uvicorn **single-worker only** (see Pitfalls)
-- `gemini-webapi>=2.0.0`, `browser-cookie3`, `httpx`, `curl-cffi`
+- Litestar 2.x + uvicorn **single-worker only** (see Pitfalls)
+- `gemini-webapi>=2.0.0`, `httpx`, `curl-cffi`
 - Tests: stdlib `unittest`
 - Tooling: `uv`, `ruff`, `pip-audit` orchestrated by `mise`
 
 ## Commands
 
 ```
-mise run lint       # ruff with the F,E,W,B,I,UP,RUF,SIM,PIE,RET,C4,PTH,Q selection (--line-length 120)
-mise run test       # unittest discover server/tests -v
-mise run audit      # pip-audit -r server/requirements.txt --strict
-mise run serve      # ./start.sh on port 6969
-mise run setup      # venv + deps via uv pip sync
+mise run lint    # ruff (rules in mise.toml, line-length 120)
+mise run test    # unittest discover server/tests -v
+mise run audit   # pip-audit --strict
+mise run serve   # ./start.sh on :6969
+mise run setup   # venv + uv pip sync
 ```
 
 Health check: `curl http://localhost:6969/healthz`.
@@ -28,49 +28,54 @@ Health check: `curl http://localhost:6969/healthz`.
 
 | Area | Role |
 |---|---|
-| `server/src/run.py` | Entrypoint script: arg parsing, cookie probe, boot banner, `uvicorn.Server.run()` |
-| `server/src/app/main.py` | Litestar bootstrap, lifespan, CORS, OpenAI-shape exception handlers, `/docs` toggle |
+| `server/src/run.py` | Entrypoint: arg parsing, cookie probe, boot banner, `uvicorn.Server.run()` |
+| `server/src/app/main.py` | Litestar bootstrap, lifespan, CORS, OpenAI-shape exception handlers |
 | `server/src/app/endpoints/chat.py` | `/v1/chat/completions`, `/v1/models`, prompt building, tool-call shim |
-| `server/src/app/endpoints/auth.py` | `/auth/cookies/{provider}`, `/auth/accounts/{provider}`, `/runtime/status`, `/runtime/gem`, `/accounts` (list), `/accounts/use` (switch + persist) |
-| `server/src/app/services/gemini_client.py` | Public service surface: module-level globals `_gemini_client` + `_selected_gem_id`, `init/refresh_gemini_client`, env/config resolvers, `persist_selected_account_id` |
-| `server/src/app/services/gemini_wrapper.py` | `BridgeGeminiClient` — wraps `gemini_webapi.GeminiClient` with account routing + cookie persistence |
-| `server/src/app/services/account_discovery.py` | Cross-browser Gemini account harvest: `discover_accounts()` returns `[{id:"<browser>:<idx>", browser, index, email}]` by combining browser cookies + `/u/0..7` probes. Powers `AccountsController` and the boot-time `selected_account_id` resolver. |
-| `server/src/app/utils/browser.py` | Local-browser cookie fallback delegating to `gemini_webapi.utils.load_browser_cookies` (chrome, chromium, opera, brave, edge, vivaldi, firefox, librewolf, safari). `[Browser].name` is honored as a *preference*; `get_all_cookie_pairs` returns every browser session for the multi-account flow. |
-| `server/src/app/settings.py` | Centralised env-var reading. Add new `GEMINI_BRIDGE_*` knobs here, not inline. |
-| `server/src/app/schemas/request.py` | `OpenAIChatRequest` + typed `ChatMessage` Pydantic models for `/v1/chat/completions` |
-| `server/tests/` | stdlib `unittest` suites covering all endpoints, the tool-call shim, env resolvers, and security knobs (CORS / compression / cookie chmod) |
-| `extension/` | Chrome MV3 — `popup.{html,js}`, `background.js`, `providers.js`, `manifest.json` |
-| `extension/icons/icon.svg` | Source of truth — PNG sizes regenerated with `rsvg-convert -w N -h N icon.svg -o iconN.png` |
-| `examples/` | Drop-in client config (`opencode.jsonc`) |
+| `server/src/app/endpoints/auth.py` | `/auth/cookies/{provider}`, `/auth/accounts/{provider}` — extension cookie push + email probe. |
+| `server/src/app/endpoints/runtime.py` | `/runtime/status`, `/runtime/gem` — extension-guarded status + per-account Gem selection. |
+| `server/src/app/endpoints/accounts.py` | `/accounts/`, `/accounts/refresh` — registry inventory + cross-browser rediscovery. |
+| `server/src/app/services/account_registry.py` | `Account` + `AccountRegistry` (in-process map on `app.state.account_registry`). Ids: `<browser>:<index>`, `extension:<index>`, `env:0`. |
+| `server/src/app/services/bootstrap.py` | Boot-time only: env/config resolvers, `parse_gem_id`, `bootstrap_*`. |
+| `server/src/app/services/account_routed_client.py` | `AccountRoutedGeminiClient(WebGeminiClient)` — see Pitfalls. |
+| `server/src/app/services/account_discovery.py` | `discover_accounts()` — combines browser cookies + `/u/0..7` probes into `[{id, browser, index, email}]`. |
+| `server/src/app/utils/browser.py` | Wraps `gemini_webapi.utils.load_browser_cookies`. `[Browser].name` is a tie-break preference. |
+| `server/src/app/settings.py` | All `GEMINI_BRIDGE_*` env knobs land here. |
+| `server/src/app/schemas/openai_chat.py` | `OpenAIChatRequest` + `ChatMessage` Pydantic models. |
+| `server/tests/` | stdlib `unittest` — endpoints, tool-call shim, routing precedence, registry lifecycle. |
+| `extension/` | Chrome MV3 — `popup.{html,js}`, `background.js`, `providers.js`, `manifest.json`. |
+| `examples/` | Drop-in client configs (`opencode.jsonc`, `zed.jsonc`, `pi.ts`). |
 
 ## Known pitfalls (not derivable from code)
 
-- **Single-worker uvicorn is mandatory** — `_gemini_client` and `_selected_gem_id` are module-level globals in `services/gemini_client.py`. Multi-worker yields disjoint clients.
-- **Stateless mode** — `ChatSession` is avoided entirely until upstream `gemini-webapi` releases PR #296 (`DEFAULT_METADATA.copy()`) and resolves issue #297 (missing `SNlM0e` token). Each request rebuilds the full prompt.
-- **`UNAUTHENTICATED` warning at boot is benign** — `gemini-webapi`'s `_fetch_user_status` logs `Account status: UNAUTHENTICATED` because Google's `GET_USER_STATUS` RPC requires a `Authorization: SAPISIDHASH` header the lib doesn't compute. `StreamGenerate` (chat) accepts plain cookies and serves every model correctly regardless. The only thing that's degraded is `client.list_models()` / `client._model_registry` — they fall back to a minimal Free-tier shape. Don't build features that *enforce* tier-based decisions on this registry; use it for diagnostics only.
+- **Single-worker uvicorn is mandatory** — the `AccountRegistry` lives on `app.state.account_registry` and is per-process. Multi-worker yields disjoint registries (extension push lands on worker A, chat request hits worker B with no client).
+- **`AccountRoutedGeminiClient` MUST be a subclass** — the lib's `@running` decorator silently re-inits the client when `auto_close` fires, rebuilding `AsyncSession` from scratch. Overriding `init()` is the only way to re-install the `/u/{N}/` route patch on every re-init. A composition wrapper would lose the patch on the first auto-reopen.
+- **Lifecycle is 100% delegated to `gemini-webapi`** — `init(auto_close=True, close_delay=…, auto_refresh=True, refresh_interval=…)` per account: the lib closes idle clients, transparently re-inits via `@running` on the next call, and rotates `__Secure-1PSIDTS` in the background. Knobs live in `app/settings.py` (`ACCOUNT_IDLE_CLOSE_SECONDS`, `ACCOUNT_REFRESH_INTERVAL_SECONDS`). Do not re-implement any of these in bridge code.
+- **Cookie persistence is the lib's** — rotated `1PSIDTS` is cached in `/tmp/gemini_webapi/<hash>.json` keyed per `__Secure-1PSID`, so N concurrent accounts in the same process don't collide. Bridge no longer writes rotated cookies to `config.ini`.
+- **Routing is mandatory and explicit — no default anywhere** — `/v1/chat/completions` MUST carry `X-Bridge-Account: <id>` header OR `model@<id>` suffix (suffix only triggers if `<id>` contains `:`, so `name@example.com`-style models survive). Header wins. No routing → **400**. `/v1/models` returns only `<model>@<id>` entries. `POST /runtime/gem` requires `account_id` (422 otherwise). Stale `[Cookies].selected_account_id` in `config.ini` from older versions is silently ignored.
+- **Stateless mode + benign `UNAUTHENTICATED` boot warning** — both rooted in upstream issue #297 (missing `SNlM0e` token) and PR #296 (unmerged `ChatSession` shared-state fix). The bridge avoids `ChatSession` and rebuilds the full prompt every turn. `_fetch_user_status` logs `Account status: UNAUTHENTICATED` at boot because the lib doesn't compute the `SAPISIDHASH` header — chat is unaffected (`StreamGenerate` accepts plain cookies), only `client.list_models()` is degraded (Free-tier shape). Don't gate features on the model registry.
 - **Silent abort at ~100 KB** — Gemini Web drops prompts above ~100 KB silently (varies per model). Reason for `_trim_messages_to_fit()` + cap `settings.MAX_PROMPT_CHARS=100_000`. Override with env `GEMINI_BRIDGE_MAX_PROMPT_CHARS=N`.
 - **Chrome device-bound cookies** (2025+) — cookies extracted from Chrome flagged as detached → silent abort on Pro models. Firefox capture is the workaround.
 - **Synthetic SSE** — `gemini-webapi` returns the full response in one shot; the bridge then chunks it into SSE frames.
 - **Tool-calling via regex shim** — Gemini Web has no native function calling. The bridge injects a custom system prompt asking Gemini to emit `<<TOOL_CALL>>{...}<<END>>`, then parses it back into OpenAI `tool_calls[]`.
-- **Request timeout deferred to lib** — `BridgeGeminiClient.init` forwards `settings.REQUEST_TIMEOUT_SECONDS` to `gemini-webapi`'s `init(timeout=...)`. Do not re-wrap `client.generate_content` in `asyncio.wait_for` — it would double-time the request and lose the lib's zombie-stream retry. Override via `GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS=N`.
+- **Request timeout deferred to lib** — `AccountRoutedGeminiClient.init` is called with `timeout=settings.REQUEST_TIMEOUT_SECONDS`. Do not re-wrap `client.generate_content` in `asyncio.wait_for` — it would double-time the request and lose the lib's zombie-stream retry. Override via `GEMINI_BRIDGE_REQUEST_TIMEOUT_SECONDS=N`.
+- **Vision via tempfile, not bytes** — `image_url` blocks are materialized to `/tmp/gemini-bridge-img-*` with a MIME-derived suffix before `generate_content(files=...)`. Raw `bytes` default-name uploads to `.txt`, which Gemini silent-aborts. Cleanup in `try/finally` around the whole handler; extraction runs *after* trimming so dropped messages don't leak uploads.
+- **Image resize to ~150 KB** — Google's upload returns `HTTP Error 0: OK` on big PNGs and Gemini hallucinates above ~150 KB binary, so `_maybe_resize_image()` flattens alpha and downscales (PNG first, JPEG q=95→45 fallback). Knobs: `GEMINI_BRIDGE_MAX_IMAGE_BYTES`, `GEMINI_BRIDGE_MAX_IMAGE_DIM`. Pi and Zed describe screenshots reliably; **opencode vision is flaky** (hallucination on ~30 % of dense screenshots even after resize). Suspected cause is opencode's prompt shape (`[Image 1]` placeholder without an explicit anchor); we don't work around it — Pi-style "tool-result image" wins, opencode's drag-and-drop is upstream's call to fix.
+- **Reasoning via `reasoning_content`** — `ModelOutput.thoughts` is surfaced as DeepSeek-R1-style `reasoning_content` (own SSE chunk between role and content; extra key on non-stream `message`). Empty/None → field omitted. Clients must opt in (`reasoning: true` for opencode, `capabilities.interleaved_reasoning: true` for Zed, `compat.thinkingFormat: "deepseek"` for pi) — see `examples/`. Vision needs a parallel opt-in: `attachment` + `modalities.input` for opencode, `capabilities.images` for Zed; pi handles both via `input: ["text","image"]` + auto-detect on `-thinking` suffix.
 
 ## Working rules
 
 - Before claiming "done", always run `mise run lint && mise run test`.
 - When touching OpenAI-compat endpoints (`/v1/*`), test with both a plain `curl` **and** a real client (Chrome extension or `examples/opencode.jsonc`) — Pydantic validation can pass while serialization breaks on the SDK side.
-- **Never** restart the running bridge service or kill the process listening on `:6969` without confirmation — a dev instance may be in use.
 - All files in this repo must be in English (code, docs, comments, commit messages).
 - OpenAPI is off by default. `GEMINI_BRIDGE_ENABLE_DOCS=1` exposes Stoplight Elements at `/docs` (raw schema at `/docs/openapi.json`). Other Litestar UIs (Swagger, Redoc, …) are intentionally not registered — see `render_plugins=` in `app/main.py`.
 
 ### Extension policy
 
-The Chrome extension is **permanently developer-mode (Load unpacked)** and will **never be published** to the Chrome Web Store. The following are therefore out of scope and should not be raised in audits:
+The Chrome extension is **permanently developer-mode (Load unpacked)** — never published to the Web Store. Out-of-scope for audits (revisited if the bridge ever gains remote exposure):
 
 - Broad `host_permissions` in `manifest.json`
-- CORS `chrome-extension://*` not narrowed to a specific ID (changes per dev install)
+- CORS `chrome-extension://*` not narrowed to a specific ID
 - `extension_only` Guard accepting any non-empty `X-Extension-Id` — loopback bind is the real boundary
-
-These constraints are revisited when the bridge gains remote exposure with real auth.
 
 ### Commits
 
@@ -79,27 +84,17 @@ These constraints are revisited when the bridge gains remote exposure with real 
 
 ### Tests
 
-- **Tests are rigid — they don't adapt to code.** When a test fails after a change:
-  - First reflex: *did I break a contractual intent?* If yes → fix the code, not the test.
-  - **Never** modify an assertion just to make a red test pass. If the contract must legitimately change, make that explicit before touching the test.
-- New code = new tests describing the *expected* behavior, not a copy of the *observed* behavior.
-- Mocks **only at the boundary** (external HTTP, time, randomness). No mocks on internal services, on disk reads, etc. — those hide wiring bugs.
+- **Tests are rigid.** A red test means the code broke a contract — fix the code, not the assertion. Only touch the assertion if the contract has explicitly changed.
+- Mocks **only at the boundary** (external HTTP, time, randomness). Never on internal services / disk.
+- **A new test must hit at least one of three criteria**: (1) regression of a real upstream-Gemini quirk not obvious from the code (silent abort at ~100 KB, JSON-quoted email scrape, captcha 302, …), (2) pins an external contract (response shape, status, header) a client depends on, (3) non-trivial conditional logic of the bridge (env > config precedence, head-tail trim, tool-call shim, `/u/N/` URL rewrite). If none apply, don't write it. Testing `Field(ge=0)` or `mock.called_with(...)` is testing the framework.
 
 ## Security
 
-The bridge handles Google session cookies (`__Secure-1PSID*`) — treat them like passwords. Defaults are safe (loopback bind, `chmod 0600` on `config.conf`, no telemetry). Full threat model and reporting policy in [`SECURITY.md`](SECURITY.md).
-
-When making security-sensitive changes (auth, CORS, secrets, file permissions, network exposure), update `SECURITY.md` in the same commit.
+Treats Google `__Secure-1PSID*` cookies as passwords. Defaults are safe (loopback bind, `chmod 0600` on `config.ini`, no telemetry). Threat model in [`SECURITY.md`](SECURITY.md) — update it in the same commit for any auth/CORS/secrets/network change.
 
 ## Deploy
 
-Three install modes (full instructions in [`README.md`](README.md)):
-
-- **Native** — `./start.sh` (creates venv, installs deps, runs uvicorn on `:6969`).
-- **Docker** — `docker compose up -d` (binds `127.0.0.1:6969`, persists `config.conf` to a named volume).
-- **systemd user service** — `systemctl --user enable --now gemini-bridge` after `./start.sh --setup-only`.
-
-All modes are loopback-only. Remote exposure is not the current default.
+Three loopback-only modes (details in [`README.md`](README.md)): native (`./start.sh`), Docker (`docker compose up -d`), systemd user service.
 
 ## Quick debug
 

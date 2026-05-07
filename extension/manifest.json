@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Bridge",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Sync Gemini auth cookies to the local Gemini Bridge server.",
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [

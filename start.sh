@@ -35,10 +35,10 @@ if [[ ! -d ".venv" ]]; then
   uv venv --python 3.13
   uv pip install -q -r requirements.txt
 
-  if [[ ! -f config.conf ]]; then
-    cp config.conf.example config.conf
+  if [[ ! -f config.ini ]]; then
+    cp config.ini.example config.ini
   fi
-  chmod 0600 config.conf
+  chmod 0600 config.ini
   echo
   echo ">> Setup done. Don't forget to load ./extension/ in chrome://extensions/"
   echo "   (toggle Developer mode → Load unpacked → select extension/)"

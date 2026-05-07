@@ -15,7 +15,7 @@ except ImportError:
 from app import settings
 from app.config import CONFIG
 from app.main import app
-from app.services.gemini_client import _resolve_cookies
+from app.services.bootstrap import _resolve_cookies
 
 
 class Colors:
