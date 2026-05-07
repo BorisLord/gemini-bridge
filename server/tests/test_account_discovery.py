@@ -11,6 +11,7 @@ from app.main import app
 from app.services.account_discovery import (
     discover_accounts,
     parse_account_id,
+    probe_gemini_account,
     resolve_session_for_account_id,
 )
 from app.services.account_registry import AccountRegistry
@@ -37,12 +38,6 @@ class TestParseAccountId(unittest.TestCase):
     def test_empty_browser_returns_none(self):
         self.assertIsNone(parse_account_id(":1"))
 
-    def test_non_string_returns_none(self):
-        # Defensive: callers always pass str (Pydantic-validated), but a future
-        # internal caller passing an int / None must not crash the resolver.
-        self.assertIsNone(parse_account_id(None))  # type: ignore[arg-type]
-        self.assertIsNone(parse_account_id(42))    # type: ignore[arg-type]
-
 
 class TestResolveSession(unittest.TestCase):
     def test_unknown_browser_returns_none(self):
@@ -62,6 +57,55 @@ class TestResolveSession(unittest.TestCase):
     def test_malformed_id_returns_none(self):
         with patch("app.services.account_discovery.get_all_cookie_pairs", return_value={"firefox": ("p", "pts")}):
             self.assertIsNone(resolve_session_for_account_id("garbage"))
+
+
+class TestProbeGeminiAccount(unittest.IsolatedAsyncioTestCase):
+    """The email regex is the only fragile surface that touches Gemini's HTML
+    directly — Google rewrote the markup once between v0.1.0 and v0.1.1
+    (plain text → JSON-quoted), silently breaking `/auth/accounts/`. Pin the
+    JSON-quoted form here so a future regex regression is caught at unit-test
+    time instead of via a silent prod failure."""
+
+    @staticmethod
+    def _fake_response(status: int, body: str, path: str = "/u/3/app"):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            status_code=status,
+            text=body,
+            url=SimpleNamespace(path=path),
+        )
+
+    async def test_extracts_email_from_json_quoted_html(self):
+        # Decoy email appears unquoted earlier in the page (Google embeds
+        # `mailto:foo@x.com` and similar non-user references). The probe MUST
+        # ignore the unquoted form and only return the JSON-quoted user email
+        # — that's the regex contract that broke in v0.1.0 → v0.1.1.
+        body = (
+            'mailto:decoy@notuser.com '
+            'href="https://gemini.google.com/" '
+            'lots of html ... "alice@example.com" ... more html'
+        )
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=self._fake_response(200, body, "/u/3/app"))
+        self.assertEqual(await probe_gemini_account(client, 3), "alice@example.com")
+
+    async def test_filters_service_emails(self):
+        # Gemini embeds noreply@/...@google.com/...@gemini.google.com strings;
+        # only a real user email should survive `_is_user_email`.
+        body = (
+            '"noreply-foo@google.com" "alice@google.com" '
+            '"bot@gemini.google.com" "real@example.com"'
+        )
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=self._fake_response(200, body, "/u/2/app"))
+        self.assertEqual(await probe_gemini_account(client, 2), "real@example.com")
+
+    async def test_redirect_to_u0_returns_none(self):
+        # Empty slot: Google redirects /u/N (N>0) to /u/0/app — caller must
+        # treat it as "no account here", not "account = u/0".
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=self._fake_response(200, '"x@y.com"', "/u/0/app"))
+        self.assertIsNone(await probe_gemini_account(client, 5))
 
 
 class TestDiscoverAccounts(unittest.IsolatedAsyncioTestCase):

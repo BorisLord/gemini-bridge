@@ -39,6 +39,7 @@ def _fake_client(text: str = "ok") -> MagicMock:
     client = MagicMock()
     fake_resp = MagicMock()
     fake_resp.text = text
+    fake_resp.thoughts = None
     client.generate_content = AsyncMock(return_value=fake_resp)
     return client
 

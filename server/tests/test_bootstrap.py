@@ -11,7 +11,11 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from app.services.account_registry import Account, AccountRegistry
-from app.services.bootstrap import bootstrap_browser_accounts, bootstrap_registry
+from app.services.bootstrap import (
+    bootstrap_browser_accounts,
+    bootstrap_env_account,
+    bootstrap_registry,
+)
 
 
 class TestBootstrapRegistry(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +50,41 @@ class TestBootstrapRegistry(unittest.IsolatedAsyncioTestCase):
             await bootstrap_registry(reg)
 
         self.assertEqual(order, ["env", "browser"])
+
+
+class TestBootstrapEnvAccount(unittest.TestCase):
+    """`bootstrap_env_account` is the only path that creates `env:0` from
+    config.ini cookies (not env vars only — the file is the common case).
+    Was previously only exercised through the `bootstrap_registry` integration
+    test where it's mocked out — the wiring to CONFIG was untested."""
+
+    def test_inserts_env_zero_when_config_has_cookies(self):
+        reg = AccountRegistry()
+        fake_config = {
+            "Cookies": {"gemini_cookie_1psid": "psid-cfg", "gemini_cookie_1psidts": "psidts-cfg"},
+            "Gemini": {"gem_id": ""},
+        }
+        with patch("app.services.bootstrap.CONFIG", fake_config), \
+             patch("app.services.bootstrap.settings.cookie_1psid_env", return_value=None), \
+             patch("app.services.bootstrap.settings.cookie_1psidts_env", return_value=None), \
+             patch("app.services.bootstrap.settings.account_index_env", return_value=None), \
+             patch("app.services.bootstrap.settings.initial_gem_id_env", return_value=None):
+            bootstrap_env_account(reg)
+        a = reg.get("env:0")
+        self.assertIsNotNone(a)
+        self.assertEqual(a.psid, "psid-cfg")
+        self.assertEqual(a.psidts, "psidts-cfg")
+        self.assertEqual(a.source, "env")
+
+    def test_noop_when_no_cookies_anywhere(self):
+        # Empty config + no env vars → silently skip. Boot must still be clean.
+        reg = AccountRegistry()
+        fake_config = {"Cookies": {"gemini_cookie_1psid": "", "gemini_cookie_1psidts": ""}}
+        with patch("app.services.bootstrap.CONFIG", fake_config), \
+             patch("app.services.bootstrap.settings.cookie_1psid_env", return_value=None), \
+             patch("app.services.bootstrap.settings.cookie_1psidts_env", return_value=None):
+            bootstrap_env_account(reg)
+        self.assertIsNone(reg.get("env:0"))
 
 
 class TestBootstrapBrowserAccountsClosesOrphan(unittest.IsolatedAsyncioTestCase):

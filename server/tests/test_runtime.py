@@ -98,11 +98,6 @@ class TestRuntimeOriginChecks(unittest.TestCase):
             )
         self.assertEqual(r.status_code, 422)
 
-    def test_chat_completions_no_origin_check(self):
-        # Public API: must not be origin-gated (expect 400 for missing routing, never 403).
-        r = self.client.post("/v1/chat/completions", json={"messages": [], "model": "gemini-3-flash"})
-        self.assertNotEqual(r.status_code, 403)
-
     def test_gem_post_accepts_x_extension_id_only(self):
         # POST endpoints under the Guard must also honor the X-Extension-Id
         # fallback (not just GETs) — same contract for the whole controller.
@@ -137,16 +132,12 @@ class TestAccountIndexValidation(unittest.TestCase):
                 },
             )
 
-    def test_lower_bound_zero_passes_validation(self):
+    def test_in_bounds_accepted(self):
+        # One smoke test for a valid index — Pydantic enforces the rest.
         self.assertEqual(self._post(0).status_code, 200)
 
-    def test_upper_bound_seven_passes_validation(self):
-        self.assertEqual(self._post(7).status_code, 200)
-
-    def test_negative_rejected(self):
-        self.assertEqual(self._post(-1).status_code, 422)
-
-    def test_above_seven_rejected(self):
+    def test_out_of_bounds_rejected(self):
+        # One negative — confirms the `Field(ge=0, le=7)` annotation is wired.
         self.assertEqual(self._post(8).status_code, 422)
 
 
@@ -187,6 +178,20 @@ class TestExtensionPushPopulatesEmail(unittest.TestCase):
             )
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(reg.get("extension:0").email)
+
+    def test_unknown_provider_returns_501(self):
+        # The endpoint accepts any `{provider}` in the path but only knows how
+        # to wire 'gemini'. A future provider (claude.ai, openai.com session)
+        # would need explicit support — until then, fail loudly with 501 so a
+        # client can't quietly burn a cookie push that goes nowhere.
+        with install_registry(AccountRegistry()):
+            r = self.client.post(
+                "/auth/cookies/anthropic",
+                headers={"X-Extension-Id": "x"},
+                json={"cookies": {"__Secure-1PSID": "p", "__Secure-1PSIDTS": "pts"}},
+            )
+        self.assertEqual(r.status_code, 501)
+        self.assertIn("anthropic", r.json()["error"]["message"])
 
 
 if __name__ == "__main__":

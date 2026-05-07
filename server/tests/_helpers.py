@@ -30,12 +30,15 @@ def make_account(id_: str = "firefox:0", **overrides) -> Account:
     return Account(**base)
 
 
-def fake_client(text: str = "ok") -> MagicMock:
+def fake_client(text: str = "ok", thoughts: str | None = None) -> MagicMock:
     """Stand-in for `AccountRoutedGeminiClient` — only `generate_content` is
-    exercised by the chat path."""
+    exercised by the chat path. Explicit `thoughts` (default None) keeps
+    MagicMock from auto-spawning a truthy attribute that would mis-trigger
+    the reasoning_content path."""
     c = MagicMock()
     resp = MagicMock()
     resp.text = text
+    resp.thoughts = thoughts
     c.generate_content = AsyncMock(return_value=resp)
     return c
 
@@ -44,6 +47,7 @@ def seeded_registry(
     account_count: int = 1,
     with_clients: bool = True,
     response_text: str = "ok",
+    response_thoughts: str | None = None,
 ) -> AccountRegistry:
     """Build a registry with N firefox accounts, optionally pre-attached with
     mock clients so `get_or_init_client` returns them without hitting Google."""
@@ -51,7 +55,7 @@ def seeded_registry(
     for idx in range(account_count):
         a = make_account(f"firefox:{idx}")
         if with_clients:
-            a.client = fake_client(text=response_text)
+            a.client = fake_client(text=response_text, thoughts=response_thoughts)
         reg.upsert(a)
     return reg
 

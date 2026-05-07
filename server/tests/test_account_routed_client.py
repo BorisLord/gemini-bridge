@@ -9,7 +9,7 @@ and verify the route patch still sticks."""
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.account_routed_client import AccountRoutedGeminiClient
+from app.services.account_routed_client import AccountRoutedGeminiClient, _inject_account_index
 
 
 class _FakeSession:
@@ -113,6 +113,39 @@ class TestAccountRouterPatch(unittest.IsolatedAsyncioTestCase):
         ):
             await client.init()
         self.assertEqual(captured["extras"], {"SAPISID": "sapi-val", "HSID": "hsid-val"})
+
+
+class TestInjectAccountIndex(unittest.TestCase):
+    """Unit-level coverage of the URL rewrite — the routing wrapper closes
+    over this function, so its correctness IS the routing contract. Without
+    these checks, a regression here would only surface as silent
+    wrong-account traffic at runtime."""
+
+    def test_rewrites_gemini_url_with_user_slot(self):
+        self.assertEqual(
+            _inject_account_index("https://gemini.google.com/_/BardChatUi/data", 4),
+            "https://gemini.google.com/u/4/_/BardChatUi/data",
+        )
+
+    def test_idempotent_when_url_already_prefixed(self):
+        # Re-wrapping after auto_close re-init must not stack two /u/N/ slots.
+        self.assertEqual(
+            _inject_account_index("https://gemini.google.com/u/4/_/x", 4),
+            "https://gemini.google.com/u/4/_/x",
+        )
+
+    def test_account_index_zero_is_passthrough(self):
+        self.assertEqual(
+            _inject_account_index("https://gemini.google.com/_/x", 0),
+            "https://gemini.google.com/_/x",
+        )
+
+    def test_foreign_host_untouched(self):
+        # Login flow / auxiliary Google domains must not get /u/N injected.
+        self.assertEqual(
+            _inject_account_index("https://accounts.google.com/oauth", 4),
+            "https://accounts.google.com/oauth",
+        )
 
 
 if __name__ == "__main__":

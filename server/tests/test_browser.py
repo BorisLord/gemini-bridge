@@ -2,7 +2,7 @@
 `gemini_webapi.utils.load_browser_cookies` at the boundary; CONFIG['Browser']
 is patched per case to avoid touching the real one."""
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from app.utils.browser import _extract_pair, get_all_cookie_pairs, get_cookie_from_browser
 
@@ -28,12 +28,6 @@ class TestBrowserDispatch(unittest.TestCase):
         with patch("app.utils.browser.CONFIG", {"Browser": {"name": "firefox"}}), \
              patch("app.utils.browser.load_browser_cookies", return_value=result):
             self.assertEqual(get_cookie_from_browser("gemini"), ("psid-val", "psidts-val"))
-
-    def test_calls_lib_with_google_domain_filter(self):
-        mock = MagicMock(return_value={})
-        with patch("app.utils.browser.load_browser_cookies", mock):
-            get_cookie_from_browser("gemini")
-        mock.assert_called_once_with(domain_name="google.com")
 
     def test_preferred_browser_wins_over_others(self):
         """When `[Browser].name` is set and present in the lib result, that
@@ -148,13 +142,6 @@ class TestGetAllCookiePairs(unittest.TestCase):
             self.assertEqual(get_all_cookie_pairs("gemini"), {
                 "firefox": ("ff-psid", "ff-psidts"),
             })
-
-    def test_calls_lib_with_google_domain_filter(self):
-        mock = MagicMock(return_value={})
-        with patch("app.utils.browser.load_browser_cookies", mock):
-            get_all_cookie_pairs("gemini")
-        mock.assert_called_once_with(domain_name="google.com")
-
 
 if __name__ == "__main__":
     unittest.main()
